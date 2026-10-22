@@ -85,19 +85,31 @@ class DepthWorld:
     detections  {item: perception.scene.Detection} (their masks label cells)
     held_box    function q -> robot.collision.Box of the held item (or None)
     prior       the DepthWorld of the survey before the held item was picked up (or None)
+    region      (x_range, y_range) the map covers (each grown by 5 cm), or None for the
+                placement region of cell.yaml: a map of the surroundings of the board
+                (a fixed barrier) takes a larger one
+    fill_unseen False: cells no view saw stay empty instead of being bounded by the camera
+                rays (the map then holds only what was measured)
+    base_height within NEAR_BASE of the robot's base axis, points higher than this above the
+                table are the robot (default: the map's ceiling less 6 cm). A map with a high
+                ceiling (a tall obstacle) needs the height of the tallest item here, or the
+                arm over the base is taken for the obstacle.
     """
 
     def __init__(self, frames, cell, items, basket, basket_xy, detections, max_item_height=0.30,
-                 robot_radius=0.17, held_box=None, mask_erode_px=3, prior=None):
+                 robot_radius=0.17, held_box=None, mask_erode_px=3, prior=None, region=None, fill_unseen=True,
+                 base_height=None):
         self.cell = cell
         self.items = items
         self.basket = basket
         self.basket_xy = None if basket_xy is None else np.asarray(basket_xy, float)
         self.table_z = cell["table"]["surface_z"]
         self.z_max = self.table_z + max_item_height
+        self.base_z = self.z_max - 0.06 if base_height is None else self.table_z + base_height
         pl = cell["placement"]
-        self.x0, x1 = pl["x_range"][0] - 0.05, pl["x_range"][1] + 0.05
-        self.y0, y1 = pl["y_range"][0] - 0.05, pl["y_range"][1] + 0.05
+        x_range, y_range = region if region is not None else (pl["x_range"], pl["y_range"])
+        self.x0, x1 = x_range[0] - 0.05, x_range[1] + 0.05
+        self.y0, y1 = y_range[0] - 0.05, y_range[1] + 0.05
         self.nx = int(math.ceil((x1 - self.x0) / CELL))
         self.ny = int(math.ceil((y1 - self.y0) / CELL))
         X, Y = self.centres()
@@ -110,7 +122,10 @@ class DepthWorld:
         seen = np.isfinite(top)
         H = np.where(seen & (top > self.support + MIN_HEIGHT), top, FLOOR)
         self.unseen = ~seen & ~self.keepout & ~self.wall
-        H = self._fill_unseen(H, X, Y)
+        if fill_unseen:
+            H = self._fill_unseen(H, X, Y)
+        else:
+            self.carved = np.zeros(H.shape, bool)
         if held_box is not None:
             H = self._below_held(H, held_box)
         if prior is not None and prior.H.shape == H.shape:
@@ -186,7 +201,7 @@ class DepthWorld:
         P = f.points_world(stride=STRIDE)
         P = P[(P[:, 2] > self.table_z - 0.02) & (P[:, 2] < self.z_max + 0.05)]
         r = np.hypot(P[:, 0], P[:, 1])
-        P = P[(r > robot_radius) & ((r > NEAR_BASE) | (P[:, 2] < self.z_max - 0.06))]
+        P = P[(r > robot_radius) & ((r > NEAR_BASE) | (P[:, 2] < self.base_z))]
         if f.q is not None:
             P = remove_robot(P, f.q, self.cell)
             if held_box is not None:

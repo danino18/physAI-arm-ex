@@ -120,6 +120,7 @@ linked, so editing them needs no new build).
 | `skills.py` | `pick_up` | `(pick-up X)`: check the gripper is empty, look (also from the side when X is not recognised from above, then from closer), find X, propose grasps in the image, plan the grasp, grasp, check the grip | every action |
 | | `put_on_table` | `(put-on-table X)`: check the gripper holds X, look, find a free table spot, put X there, check it let go | every action |
 | | `put_in_basket` | `(put-in-basket X)`: check the gripper holds X, look, find the basket's emptiest spot, drop X there, check it let go | every action |
+| `scene_model.py` | `scan_environment`, `static_obstacles`, `boxes_from_height_map` | `scan:` in a console: the views a fixed barrier is scanned from, and its boxes from the height map of those views (see [What the robot keeps clear of](#what-the-robot-keeps-clear-of)) | `scan:` in a console |
 | `misc.py` (bonus) | `new_item` | `new-item: NAME`: find an unknown item by its text prompt (SAM 3), measure it, add it | `new-item:` in a console |
 | | `forget_item` | `forget-item: NAME`: forget an added item | `forget-item:` in a console |
 
@@ -741,7 +742,8 @@ planning scene:
   could not see (behind a tall item, which may be an item SAM 3 missed), up
   to the height the camera's rays bound it to;
 * **the item in the gripper:** its model's box, held where it was grasped
-  (`held_box`), moves with the gripper.
+  (`held_box`), moves with the gripper;
+* **a fixed barrier** (a wall, a partition), when one was scanned (below).
 
 The straight moves down to a grasp or a place and back up are MoveIt's
 Cartesian paths, checked against the same scene: the fingers may not touch
@@ -757,6 +759,38 @@ items, strips outside the view), and the coloured outlines are the recognised
 items:
 
 ![depth map](docs/depth_map_example.png)
+
+**An obstacle that stays** (a big wooden cube, a wall, a partition). What a
+look shows is replaced by the next look, so an obstacle that stays is scanned
+once instead (`exercise/scene_model.py`). In a console (either), with a hand on
+the emergency stop, since the obstacle is not known to MoveIt yet:
+
+```text
+scan:              # looks from OBSERVATION_JOINTS and the SCAN_VIEWS, keeps clear of the tallest thing that is no item
+scan: all          # ... of everything that is no item, the basket or the table
+forget-barrier:    # the motions no longer keep clear of it
+```
+
+The depth of all the views goes into the same height map, over the larger
+region of `barrier:` in `config/perception.yaml` (only what was measured, not
+the space no view saw); what no item, the basket or the table explains is
+the candidate, and the tallest piece of at least 16 cm^2 (`tallest_piece`) is
+the obstacle. It becomes a few boxes (oriented along a slanted wall, one per
+height of a stepped one; `static_obstacles`), which are in MoveIt's planning
+scene with every motion from then on, and which the motions rise above
+(`rise_z`). The log lists every such thing with its height (`seen from N
+views, no item, basket or table: ...`). The scan is saved as `barrier.json` in
+the run directory; `--barrier-file FILE` loads it in a later run without
+scanning. A motion is planned the simplest way that is free (a straight line
+in joint space, else straight up and then a line, else RRT-Connect, twice);
+the console log says which one (`motion: ...`).
+
+To pick up the yellow block and put it in the basket without touching the
+obstacle, after `scan:`: `(pick-up yellow-block)` then `(put-in-basket
+yellow-block)` in the action console, or `(in-basket yellow-block)` in the goal
+console (the same two actions, planned).
+
+Check it offline with `python3 src/lab_replica/tools/check_exercise.py barrier`.
 
 ## Watching it, and when something goes wrong
 

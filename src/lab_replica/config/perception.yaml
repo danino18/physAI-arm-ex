@@ -33,6 +33,16 @@ robot_radius: 0.17
 # Points higher above the table than this are not items (gripper, arm).
 max_item_height: 0.30
 
+# The fixed barrier (a wall, a partition) that the `scan:` command of the
+# consoles looks for (exercise/scene_model.py): the map covers this region (a
+# little more than the board, short of the wall at cell.yaml's room.wall_y) up
+# to this height above the table; what the scan measures there that is no
+# item, no basket and not the table becomes boxes MoveIt keeps clear of.
+barrier:
+  x_range: [-0.10, 0.90]
+  y_range: [-0.38, 0.36]
+  max_height: 0.60
+
 # Text prompts per item; the first one is the main name. The basket is
 # found with its own prompt.
 basket_prompt: woven basket

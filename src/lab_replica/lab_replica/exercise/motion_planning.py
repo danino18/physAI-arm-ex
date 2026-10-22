@@ -43,6 +43,8 @@ DROP_APPROACH = 0.06        # ... and to a drop into the basket (a tall item is 
 RELEASE_GAP = 0.004         # an item put on the table is released this far above it
 SLOW = 0.06                 # the last (first) part of a descent (lift) that is slow
 RISE_Z = 0.60               # plan_path: the height the mounting face rises to before a straight line
+RISE_CLEARANCE = 0.10       # ... and this much above a barrier (scene_model.py) taller than that
+RRT_RETRY_TIME = 15.0       # plan_path: planning time [s] of RRT-Connect's second try
 JOINT_WEIGHTS = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 0.3])   # turning the last wrist joint is harmless
 
 
@@ -125,24 +127,48 @@ def straight_path(moveit, q0, q1, width, held=None):
     return None
 
 
+def rise_z(moveit):
+    """The height plan_path rises to: RISE_Z, or RISE_CLEARANCE above the
+    barrier (scene_model.py; `moveit.barrier_top`) when that is higher."""
+    top = getattr(moveit, "barrier_top", None)
+    return RISE_Z if top is None else max(RISE_Z, top + RISE_CLEARANCE)
+
+
+def _note(moveit, text):
+    log = getattr(moveit, "log", None)
+    if log is not None:
+        log(f"  motion: {text}")
+
+
 def plan_path(moveit, q0, q1, width, held=None):
     """A collision-free joint path from q0 to q1, the simplest that is free:
-    the straight line in joint space; else straight up first (to RISE_Z, a
+    the straight line in joint space; else straight up first (to rise_z, a
     Cartesian path), then the straight line; else MoveIt's planner
-    (RRT-Connect), which finds a way around but not always a short one."""
+    (RRT-Connect), which finds a way around but not always a short one, tried
+    a second time for longer. Which of them it was is logged."""
     path = straight_path(moveit, q0, q1, width, held)
     if path is not None:
+        _note(moveit, "straight line in joint space")
         return path
     T0 = fk(q0)
-    if T0[2, 3] < RISE_Z - 0.01:
+    z = rise_z(moveit)
+    if T0[2, 3] < z - 0.01:
         try:
-            up = moveit.cartesian_path(q0, [lifted(T0, RISE_Z - T0[2, 3])], width, held)
+            up = moveit.cartesian_path(q0, [lifted(T0, z - T0[2, 3])], width, held)
             rest = straight_path(moveit, up[-1], q1, width, held)
             if rest is not None:
+                _note(moveit, f"straight up to {z:.2f} m, then a straight line")
                 return up + rest[1:]
         except PlanError:
             pass
-    return moveit.plan_to_joints(q0, q1, width, held)
+    try:
+        path = moveit.plan_to_joints(q0, q1, width, held)
+        _note(moveit, "MoveIt's planner (RRT-Connect)")
+    except PlanError as e:
+        _note(moveit, f"RRT-Connect found no way ({e}); again, for longer")
+        path = moveit.plan_to_joints(q0, q1, width, held, planning_time=RRT_RETRY_TIME)
+        _note(moveit, "MoveIt's planner (RRT-Connect, second try)")
+    return path
 
 
 def move_to_pose(moveit, q0, T, width, held=None):

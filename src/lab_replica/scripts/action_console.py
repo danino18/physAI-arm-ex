@@ -40,8 +40,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
 
-from lab_replica.console import (ACTIONS, FORGET_ITEM, NEW_ITEM, InvalidAction, Robot, Terminal,  # noqa: E402
-                                 banner, common_arguments, item_command, item_hints, parse_action,
+from lab_replica.console import (ACTIONS, FORGET_BARRIER, FORGET_ITEM, NEW_ITEM, SCAN, InvalidAction, Robot,  # noqa: E402
+                                 Terminal, banner, barrier_command, barrier_hints, common_arguments,
+                                 item_command, item_hints, parse_action, parse_barrier_command,
                                  parse_item_command, unknown_item_hint, warn_holding_added, wrap_words)
 from lab_replica.planning import pddl  # noqa: E402
 
@@ -52,6 +53,7 @@ def hints(term, added):
     term.say(term.bold("Items:   ") + wrap_words(pddl.ITEMS + [i + "*" for i in added], 9))
     term.say(term.bold("Example: ") + "(pick-up green-mug)   then   (put-in-basket green-mug)")
     item_hints(term, added)
+    barrier_hints(term)
     term.say(term.dim("Tab completes names; Ctrl-D quits."))
 
 
@@ -62,10 +64,11 @@ def main():
     ap.add_argument("--no-window", action="store_true",
                     help="do not open the camera window (live colour and depth, annotated observations)")
     args, _ = ap.parse_known_args()
-    term = Terminal(list(ACTIONS) + list(pddl.ITEMS) + [NEW_ITEM, FORGET_ITEM], "actions")
+    term = Terminal(list(ACTIONS) + list(pddl.ITEMS) + [NEW_ITEM, FORGET_ITEM, SCAN, FORGET_BARRIER], "actions")
     banner(term, "action console", args.sim)
     robot = Robot(term, sim=args.sim, speed_scale=args.speed_scale, verbose=args.verbose,
-                  return_home=not args.no_home, save_frames=args.save_frames, window=not args.no_window)
+                  return_home=not args.no_home, save_frames=args.save_frames, window=not args.no_window,
+                  barrier_file=args.barrier_file)
     term.say(f"Ready. Log and camera views: {robot.run_dir}")
     warned = False
     try:
@@ -81,6 +84,10 @@ def main():
             if not line.strip():
                 continue
             warned = False
+            barrier_cmd = parse_barrier_command(line)
+            if barrier_cmd is not None:
+                barrier_command(term, robot, barrier_cmd)
+                continue
             try:
                 cmd = parse_item_command(line, robot.added)
             except InvalidAction as e:
