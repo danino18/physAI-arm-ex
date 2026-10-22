@@ -573,7 +573,11 @@ class ActionExecutive:
             self.phase(f"failed: {e}")
             return False, str(e)
         if self.return_home:
-            self.go_home()
+            try:
+                self.go_home()
+            except Exception as e:  # noqa: BLE001  (the robot refused the way home: the action itself is done)
+                self.log(f"  could not return home: {type(e).__name__}: {e}")
+                msg = f"{msg} (could not return home: {e})"
         self.phase(f"done: {title} ({time.time() - t0:.0f} s)")
         return True, msg
 

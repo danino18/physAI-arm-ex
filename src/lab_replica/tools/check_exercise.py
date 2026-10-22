@@ -735,6 +735,17 @@ def check_pyramid():
         check("remove_item: also from the last look", "white-block" not in stale.detections
               and "white-block" not in ex.items)
         from lab_replica.autonomy import executive as ex_mod
+
+        class Refused(Exception):
+            pass
+        ex.return_home, ex.log, ex.phase = True, lambda text: None, lambda text: None
+
+        def refuse():
+            raise Refused("home: trajectory rejected")
+        ex.go_home = refuse
+        ok, said = ex._perform(lambda: "put it", "an action")
+        check("an action that is done stays done when the robot refuses the way home",
+              ok and said.startswith("put it") and "could not return home" in said, f"{ok}, {said}")
         found = ex_mod.skill_functions(ex_mod.domain_actions())
         check("every action of domain.pddl has its skill, place-in-slot among them",
               {"pick-up", "put-on-table", "put-in-basket", "place-in-slot"} <= set(found), ", ".join(sorted(found)))
