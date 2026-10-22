@@ -62,7 +62,7 @@ from ..toolkit import (Estimate, Grasp, ImageGrasp, Placement, down_view, gauss,
 # views can be found by hand like this one (more joints), or computed (camera
 # poses: toolkit.look_at, toolkit.down_view); the skills decide when to look
 # again (skills.py).
-OBSERVATION_JOINTS = [3.0639, -1.4663, 0.6068, -0.7806, -1.5469, 1.5027]
+OBSERVATION_JOINTS = [2.981, -1.534, 0.295, -0.460, -1.520, 1.357]
 
 # From the front at an angle: SAM 3 names items it does not recognise from
 # straight above (the blue cup's yellow stripe is on its side, the spray
