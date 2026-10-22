@@ -270,7 +270,8 @@ class ActionExecutive:
         boxes = []
         pyramid = self.pyramid if self.pyramid is not None and self.pyramid.placed else None
         if scene is not None:
-            dets = {k: d for k, d in scene.detections.items() if k not in (placed or {})}
+            # (an item forgotten since the look, forget-item:, has no model any more)
+            dets = {k: d for k, d in scene.detections.items() if k not in (placed or {}) and k in self.items}
             unknown = [o for o in getattr(scene, "obstacles", ()) if not sm.near_barrier(o.polygon, self.barrier)]
             if pyramid is not None:
                 dets = {k: d for k, d in dets.items() if k not in pyramid.items()}
@@ -620,13 +621,20 @@ class ActionExecutive:
         self.action = "scan"
 
         def act():
-            boxes = sm.scan_environment(self, tallest_only=tallest_only)
+            seen = []
+            boxes = sm.scan_environment(self, tallest_only=tallest_only, report=seen)
             self.set_barrier(boxes)
+            msg = f"{len(boxes)} boxes of the obstacle"
             if self.run_dir:
                 path = os.path.join(self.run_dir, "barrier.json")
                 sm.save_boxes(path, boxes)
-                return f"{len(boxes)} boxes of the barrier (saved in {path})"
-            return f"{len(boxes)} boxes of the barrier"
+                msg += f" (saved in {path})"
+            if seen:
+                msg += "\n    seen, no item, basket or table (tallest first): " + "; ".join(seen[:4])
+            if len(boxes) > 4:
+                msg += ("\n    warning: that is a lot of boxes for one obstacle: it may be joined to something "
+                        "else; move whatever touches it, or check the list above (forget-barrier: and scan: again)")
+            return msg
 
         return self._perform(act, "scan")
 
@@ -695,6 +703,8 @@ class ActionExecutive:
         """Forget the item `name`: its model and its SAM 3 prompts."""
         self.items.pop(name, None)
         self.perception.remove_prompts(name)
+        if self.scene is not None:
+            self.scene.detections.pop(name, None)       # the last look no longer holds it
 
     def new_item(self, name, prompt, shape=None, size=None):
         """Find an item that is not known yet by its text prompt, measure it

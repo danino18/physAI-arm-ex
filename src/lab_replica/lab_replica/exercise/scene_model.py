@@ -183,14 +183,15 @@ def load_boxes(path):
 # ---- scanning ----------------------------------------------------------------------------
 
 
-def scan_environment(robot, views=None, tallest_only=True):
+def scan_environment(robot, views=None, tallest_only=True, report=None):
     """The boxes of the obstacle: the robot looks from OBSERVATION_JOINTS and
     then from each of `views` (SCAN_VIEWS; each a list of alternatives, the first
     reachable is used; a station none of whose alternatives is reachable is
     skipped), adding every view to the same scene, and models what it measured
     (static_obstacles, from robot.map_barrier(scene)): the tallest thing that is
     no item, no basket and not the table, or with `tallest_only` False every
-    such thing.
+    such thing. `report`, a list, gets a line for each of them (where, how
+    high, how large), tallest first.
 
     The motions keep clear of what the robot knows, and the barrier is not
     known yet: scan slowly, with a hand on the emergency stop. Raises PlanError
@@ -208,6 +209,8 @@ def scan_environment(robot, views=None, tallest_only=True):
         raise PlanError(f"only {used} view could be reached: no model of the barrier")
     world = robot.map_barrier(scene)
     things = describe_things(world)
+    if report is not None:
+        report.extend(things)
     robot.log(f"  seen from {used} views, no item, basket or table: " + ("; ".join(things) if things else "nothing"))
     boxes = static_obstacles(world, tallest_only=tallest_only)
     for b in boxes:

@@ -672,6 +672,23 @@ def check_pyramid():
         ex.barrier = [sm.Box("barrier 0", [0.3, -0.2, 0.08], np.eye(3), [0.03, 0.03, 0.08])]
         ex.set_obstacles(None)
         check("set_obstacles: and the fixed obstacle besides", len(sent[-1]) == 3 and sent[-1][-1].name == "barrier 0")
+        # An item forgotten (forget-item:) after the last look is still in that look's detections.
+        import types as _types
+        gone = _types.SimpleNamespace(estimate=_types.SimpleNamespace(placement=None))
+        stale = _types.SimpleNamespace(detections={"white-block": gone}, basket_xy=None, obstacles=[])
+        ex.pyramid, ex.basket = None, None
+        try:
+            ex.set_obstacles(stale)
+            ok = True
+        except KeyError:
+            ok = False
+        check("set_obstacles: an item that was forgotten since the look is no obstacle and no error", ok)
+        ex.scene, ex.perception = stale, _types.SimpleNamespace(remove_prompts=lambda name: None)
+        ex.items = dict(items)
+        ex.items["white-block"] = items["yellow-block"]
+        ex.remove_item("white-block")
+        check("remove_item: also from the last look", "white-block" not in stale.detections
+              and "white-block" not in ex.items)
         from lab_replica.autonomy import executive as ex_mod
         found = ex_mod.skill_functions(ex_mod.domain_actions())
         check("every action of domain.pddl has its skill, place-in-slot among them",

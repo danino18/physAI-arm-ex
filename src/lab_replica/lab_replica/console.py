@@ -536,7 +536,11 @@ def barrier_command(term, robot, parsed):
     Returns whether it succeeded."""
     cmd, opts = parsed
     if cmd == "forget-barrier":
-        robot.forget_barrier()
+        try:
+            robot.forget_barrier()
+        except Exception as e:  # noqa: BLE001  (a command must not end the console)
+            term.say(term.colour("obstacle not forgotten", False) + f": {type(e).__name__}: {e}")
+            return False
         term.say(term.colour("obstacle forgotten", True) + ": the motions no longer keep clear of it")
         return True
     term.say("scanning the surroundings from several views ...")
