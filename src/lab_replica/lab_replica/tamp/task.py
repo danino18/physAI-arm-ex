@@ -72,21 +72,23 @@ def default_items():
     return problem_file.default_objects()
 
 
-def problem_text(init, formula, name, items=None):
+def problem_text(init, formula, name, items=None, slots=()):
     """The exercise's problem file with `items` (default: its own objects) as
-    the objects, `init` as :init and the goal formula as :goal."""
-    return problem_file.fill(init, to_text(formula), list(items or default_items()), name=name)
+    the objects (and `slots`, the pyramid's), `init` as :init and the goal
+    formula as :goal."""
+    return problem_file.fill(init, to_text(formula), list(items or default_items()), name=name, slots=tuple(slots))
 
 
-def solve(init, formula, out_dir=None, log=print, time_limit=60, items=None):
+def solve(init, formula, out_dir=None, log=print, time_limit=60, items=None, slots=()):
     """The plan from `init` to the goal over `items` (default: the objects of
     the exercise's problem.pddl) (a Plan), with the exercise's task planner
     (exercise/task_planning: the problem file, UPF, Fast Downward, the
-    expected states). Raises planner.Unsolvable. With out_dir, problem.pddl,
-    plan.txt and planner.log are written there."""
+    expected states). `slots`: the pyramid's slots (exercise/pyramid.py), objects
+    of the problem besides the items. Raises planner.Unsolvable. With out_dir,
+    problem.pddl, plan.txt and planner.log are written there."""
     planner.check()
     name = (os.path.basename(out_dir.rstrip("/")) if out_dir else "") or "task"
-    text = problem_text(init, formula, name, items)
+    text = problem_text(init, formula, name, items, slots)
     if out_dir:
         with open(os.path.join(out_dir, "problem.pddl"), "w") as f:
             f.write(text)

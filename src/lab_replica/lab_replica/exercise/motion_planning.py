@@ -377,6 +377,19 @@ def find_table_spot(moveit, q0, held, item, box, region, obstacles, prefer, tabl
     raise PlanError(f"no place on the table for {held.item}: {last}")
 
 
+def plan_place_at(moveit, q0, held, box, x, y, z_support, yaws, force, gap=RELEASE_GAP):
+    """The first of `yaws` (the item's, best first) at which the held item can
+    be put down at (x, y) on a support z_support high, as plan_place plans it.
+    Returns (yaw, steps); raises PlanError saying why none could be."""
+    errors = []
+    for yaw in yaws:
+        try:
+            return yaw, plan_place(moveit, q0, held, box, x, y, yaw, z_support, gap, force)
+        except PlanError as e:
+            errors.append(str(e))
+    raise PlanError("no way to put it down there: " + "; ".join(sorted(set(errors))[:3]))
+
+
 # ---- what MoveIt keeps clear of -------------------------------------------------------------
 
 

@@ -60,11 +60,14 @@ def default_objects():
     return list(_default_objects(read()))
 
 
-def fill(state, goal, items, name="task"):
-    """The problem file with `items` as its objects, `state` (a set of facts)
-    as :init and `goal` (PDDL text) as :goal."""
+def fill(state, goal, items, name="task", slots=()):
+    """The problem file with `items` as its objects (and `slots`, the pyramid's,
+    of type slot), `state` (a set of facts) as :init and `goal` (PDDL text) as :goal."""
     text = _strip_comments(read())
-    objects = "(:objects\n        " + "\n        ".join(items) + "\n        - item\n    )"
+    objects = "(:objects\n        " + "\n        ".join(items) + "\n        - item"
+    if slots:
+        objects += "\n        " + "\n        ".join(slots) + "\n        - slot"
+    objects += "\n    )"
     init = "(:init\n" + "".join(f"        ({' '.join(f)})\n" for f in sorted(state)) + "    )"
     for key, new in (("goal", f"(:goal {goal})"), ("init", init), ("objects", objects)):
         a, b = _section(text, key)

@@ -35,8 +35,10 @@ from std_msgs.msg import Bool, Float64, String
 from .. import config, objects
 from ..exercise import misc
 from ..exercise import motion_planning as mp
+from ..exercise import pyramid as pyr
 from ..exercise import scene_model as sm
 from ..exercise import skills
+from ..exercise import state_estimation as se
 from ..exercise.task_planning.planning import DOMAIN_FILE
 from ..moveit_client import MoveIt
 from ..perception.rgbd import RGBDCamera
@@ -129,6 +131,7 @@ class ActionExecutive:
         self.mv.start(sim=bool(sim))
         self.obstacles = []      # the boxes in MoveIt's planning scene besides the table and the wall
         self.barrier = []        # the fixed barrier's boxes (exercise/scene_model.py): always among them
+        self.pyramid = None      # the pyramid being built (exercise/pyramid.py), whose cubes are always among them
         self.grip = {"detected": None, "width": None}
         node.create_subscription(Bool, "/rg6/grip_detected", lambda m: self.grip.__setitem__("detected", m.data), 10)
         node.create_subscription(Float64, "/rg6/width", lambda m: self.grip.__setitem__("width", m.data), 10)
@@ -257,22 +260,32 @@ class ActionExecutive:
         """The box of the held item in the gripper's frame (the exercise's held_box), or None."""
         return None if held is None else mp.held_box(held, self.items[held.item])
 
-    def set_obstacles(self, scene, exclude=(), placed=None):
-        """MoveIt's planning scene: the table and the wall, and the exercise's
-        scene_obstacles for `scene` (none without a scene) without the items
-        in `exclude`; `placed` {item: Placement} are items put down since."""
+    def set_obstacles(self, scene, exclude=(), placed=None, skip_slots=()):
+        """MoveIt's planning scene: the table and the wall, the fixed barrier,
+        the cubes of the pyramid (but those in the slots `skip_slots`: the
+        ones a cube is being put on) and the exercise's scene_obstacles for
+        `scene` (none without a scene) without the items in `exclude`;
+        `placed` {item: Placement} are items put down since. What a look
+        saw of the pyramid's cubes is left out: they are the pyramid's boxes."""
         boxes = []
+        pyramid = self.pyramid if self.pyramid is not None and self.pyramid.placed else None
         if scene is not None:
             dets = {k: d for k, d in scene.detections.items() if k not in (placed or {})}
-            # What a survey sees of the fixed barrier is the barrier's boxes already.
             unknown = [o for o in getattr(scene, "obstacles", ()) if not sm.near_barrier(o.polygon, self.barrier)]
+            if pyramid is not None:
+                dets = {k: d for k, d in dets.items() if k not in pyramid.items()}
+                unknown = [o for o in unknown if not pyramid.layout.in_zone(o.polygon.mean(axis=0))]
             boxes = mp.scene_obstacles(dets, self.items, self.basket, scene.basket_xy, self.table_z,
                                        unknown=unknown, exclude=exclude)
         for k, p in (placed or {}).items():
+            if pyramid is not None and k in pyramid.items():
+                continue
             from ..planning.placement import placement_pose
             from ..robot.collision import Box, object_box
             b = object_box(self.items[k], *placement_pose(self.items[k], p), k)
             boxes.append(Box(k, b.c, b.R, b.h + mp.ITEM_PAD))
+        if pyramid is not None:
+            boxes += pyramid.boxes(skip=skip_slots)
         boxes += self.barrier
         self.mv.set_obstacles(boxes)
         self.obstacles = boxes
@@ -534,7 +547,7 @@ class ActionExecutive:
         goes to a skill that takes it (put_on_table). Returns (success, message)."""
         name, args = parse_action(action, self.actions)
         for item in args:
-            if item not in self.items:
+            if item not in self.items and item not in pyr.SLOTS:
                 raise ActionError(f"unknown item {item!r}")
         skill = self.skills[name]
         kwargs = {"target_xy": target_xy} if "target_xy" in inspect.signature(skill).parameters else {}
@@ -600,6 +613,9 @@ class ActionExecutive:
         obstacle they show: the tallest thing that is no item (`scan: all`:
         everything that is none; exercise/scene_model.py scan_environment).
         Returns (success, message)."""
+        if self.pyramid is not None and self.pyramid.placed:
+            return False, "a pyramid stands on the table (its upper cubes would be taken for the obstacle): " \
+                          "forget-pyramid: first"
         self.log("== scan: the obstacle")
         self.action = "scan"
 
@@ -613,6 +629,45 @@ class ActionExecutive:
             return f"{len(boxes)} boxes of the barrier"
 
         return self._perform(act, "scan")
+
+    def start_pyramid(self, layout):
+        """`pyramid:` the pyramid to be built in `layout` (exercise/pyramid.py Layout), whose
+        cubes are kept clear of from now on; the one before is forgotten."""
+        self.pyramid = pyr.Pyramid(layout)
+
+    def check_pyramid_area(self, layout):
+        """`pyramid:` look at the table and say what is in the way of the
+        pyramid's area: (success, message). Success when nothing is (the
+        obstacle, the basket and the items are what it is checked against;
+        once cubes stand in the pyramid they are not looked at again)."""
+        self.log("== pyramid: is its area free?")
+        self.action = "pyramid area"
+        if self.pyramid is not None and self.pyramid.layout == layout and self.pyramid.placed:
+            return True, "the pyramid's area is the one it was started in"
+
+        def act():
+            scene = self.survey(se.OBSERVATION_JOINTS)
+            others = {k: self.items[k].footprint_world(d.estimate.placement.rest, d.estimate.placement.x,
+                                                       d.estimate.placement.y, d.estimate.placement.yaw)
+                      for k, d in scene.detections.items()}
+            for i, o in enumerate(getattr(scene, "obstacles", ())):
+                if o.support == "table" and not sm.near_barrier(o.polygon, self.barrier):
+                    others[f"an unknown obstacle at ({o.polygon.mean(axis=0)[0]:.2f}, {o.polygon.mean(axis=0)[1]:.2f})"] = o.polygon
+            basket = None
+            if scene.basket_xy is not None:
+                basket = (float(scene.basket_xy[0]), float(scene.basket_xy[1]), self.basket.r_top + 0.01)
+            problems = pyr.clear_of(layout, self.cell["placement"], self.barrier, basket, others)
+            if problems:
+                raise ActionError("; ".join(problems))
+            return "the pyramid's area is free"
+
+        ok, msg = self._perform(act, "pyramid area")
+        return ok, msg
+
+    def forget_pyramid(self):
+        """`forget-pyramid:` the cubes put in the pyramid are no obstacle in the planning scene any more."""
+        self.pyramid = None
+        self.set_obstacles(self.scene)
 
     def forget_barrier(self):
         """`forget-barrier:` the motions need not keep clear of the barrier any more."""
@@ -630,7 +685,7 @@ class ActionExecutive:
         self.items.pop(name, None)
         self.perception.remove_prompts(name)
 
-    def new_item(self, name, prompt, shape=None):
+    def new_item(self, name, prompt, shape=None, size=None):
         """Find an item that is not known yet by its text prompt, measure it
         and add it (exercise/misc.py new_item). Returns (success, message,
         spec); the spec is an objects/measured.py spec."""
@@ -639,7 +694,7 @@ class ActionExecutive:
         out = {}
 
         def act():
-            out["spec"], msg = misc.new_item(self, name, prompt, shape)
+            out["spec"], msg = misc.new_item(self, name, prompt, shape, size)
             return msg
 
         ok, msg = self._perform(act, f"new item {name}")
