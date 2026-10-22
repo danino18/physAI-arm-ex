@@ -6,7 +6,7 @@ known plan, an arm configuration, the board seen from the observation
 configuration) and compares.
 
     python3 src/lab_replica/tools/check_exercise.py              # everything
-    python3 src/lab_replica/tools/check_exercise.py task state   # some parts: task, state, observation, motion
+    python3 src/lab_replica/tools/check_exercise.py task state   # some parts: task, state, observation, motion, barrier
 
 (In the clone's top directory, after `source /opt/ros/humble/setup.bash &&
 source install/setup.bash && source .venv/bin/activate`.) The motions
@@ -325,6 +325,130 @@ def check_motion():
     run("sample_spots, is_free", spots)
 
 
+# ---- the fixed barrier (exercise/scene_model.py) and how a path is chosen around it ----------------
+
+
+def check_barrier():
+    print("fixed barrier (exercise/scene_model.py; plan_path with a stand-in for MoveIt)")
+    from lab_replica.exercise import motion_planning as mp
+    from lab_replica.exercise import scene_model as sm
+    cell_size = 0.0025
+    xs = -0.1 + (np.arange(440) + 0.5) * cell_size
+    ys = -0.4 + (np.arange(320) + 0.5) * cell_size
+    X, Y = np.meshgrid(xs, ys)
+
+    def wall(cx, cy, length, thick, angle):
+        c, s = math.cos(angle), math.sin(angle)
+        u, v = (X - cx) * c + (Y - cy) * s, -(X - cx) * s + (Y - cy) * c
+        return (abs(u) <= length / 2) & (abs(v) <= thick / 2)
+
+    def covered(boxes, m, top):
+        P = np.c_[X[m], Y[m], np.full(m.sum(), top - 0.01)]
+        inside = np.zeros(len(P), bool)
+        for b in boxes:
+            inside |= b.inside(P, 0.0)
+        return inside.mean()
+
+    def boxes_of_walls():
+        for name, m in (("straight wall", wall(0.4, 0.2, 0.5, 0.03, 0.0)),
+                        ("slanted wall", wall(0.4, 0.0, 0.6, 0.03, math.radians(35)))):
+            boxes = sm.boxes_from_height_map(X, Y, np.where(m, 0.25, -1e3), m, 0.0, cell_size)
+            area = sum(4 * b.h[0] * b.h[1] for b in boxes) / (m.sum() * cell_size ** 2)
+            check(f"boxes_from_height_map: a {name} is covered, by few boxes that hug it",
+                  covered(boxes, m, 0.25) > 0.999 and len(boxes) <= sm.MAX_BOXES and area < 3.0,
+                  f"{len(boxes)} boxes, {area:.1f}x the wall's area")
+        m = wall(0.55, 0.0, 0.6, 0.03, 0.0)
+        H = np.where(m & (X < 0.55), 0.1, np.where(m, 0.3, -1e3))
+        boxes = sm.boxes_from_height_map(X, Y, H, m, 0.0, cell_size)
+        tops = sorted(round(float(b.c[2] + b.h[2]), 2) for b in boxes)
+        check("boxes_from_height_map: a wall of two heights gets a box per height",
+              len(boxes) == 2 and abs(tops[0] - 0.12) < 0.011 and abs(tops[1] - 0.32) < 0.011, f"tops {tops}")
+        noise = np.zeros(X.shape, bool)
+        noise[100:105, 100:105] = True
+        check("boxes_from_height_map: a few cells are noise, not a barrier",
+              sm.boxes_from_height_map(X, Y, np.where(noise, 0.2, -1e3), noise, 0.0, cell_size) == [])
+        far = np.array([[0.4, 0.0, 0.1]])
+        check("a point away from the barrier is outside its boxes",
+              not any(b.inside(far, 0.0)[0] for b in sm.boxes_from_height_map(
+                  X, Y, np.where(wall(0.4, 0.2, 0.5, 0.03, 0.0), 0.25, -1e3), wall(0.4, 0.2, 0.5, 0.03, 0.0), 0.0,
+                  cell_size)))
+    run("boxes_from_height_map", boxes_of_walls)
+
+    def helpers():
+        boxes = sm.boxes_from_height_map(X, Y, np.where(wall(0.4, 0.2, 0.5, 0.03, 0.0), 0.25, -1e3),
+                                         wall(0.4, 0.2, 0.5, 0.03, 0.0), 0.0, cell_size)
+        check("barrier_top: the tallest box (and none without boxes)",
+              abs(sm.barrier_top(boxes) - 0.27) < 0.011 and sm.barrier_top([]) is None)
+        check("near_barrier: an obstacle on the barrier is it, one far off is not",
+              sm.near_barrier(np.array([[0.3, 0.2], [0.5, 0.2]]), boxes) and
+              not sm.near_barrier(np.array([[0.3, -0.1], [0.5, -0.1]]), boxes))
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            sm.save_boxes(os.path.join(d, "b.json"), boxes)
+            back = sm.load_boxes(os.path.join(d, "b.json"))
+        check("save_boxes, load_boxes: the same boxes",
+              len(back) == len(boxes) and all(np.allclose(a.c, b.c) and np.allclose(a.R, b.R) and np.allclose(a.h, b.h)
+                                              for a, b in zip(boxes, back)))
+    run("barrier helpers", helpers)
+
+    def strategies():
+        # A stand-in for MoveIt, and for the kinematics: the "height" of a configuration is its joint 1.
+        # The barrier blocks joint 0 in (0.3, 0.5) below a height of 0.5.
+        class Fake:
+            barrier_top = None
+
+            def __init__(self, rrt_fails=0):
+                self.notes, self.rrt_fails, self.times = [], rrt_fails, []
+                self.log = self.notes.append
+
+            def is_valid(self, q, width, held=None):
+                return not (0.3 < q[0] < 0.5 and q[1] < 0.5)
+
+            def cartesian_path(self, q0, poses, width, held=None):
+                q = np.array(q0, float)
+                q[1] = poses[-1][2, 3]
+                return [np.array(q0, float), q]
+
+            def plan_to_joints(self, q0, q1, width, held=None, planning_time=None):
+                self.times.append(planning_time)
+                if len(self.times) <= self.rrt_fails:
+                    raise sm.PlanError("no way")
+                return [np.array(q0, float), np.array(q1, float)]
+
+        def fake_fk(q):
+            T = np.eye(4)
+            T[2, 3] = q[1]
+            return T
+        real_fk, mp.fk = mp.fk, fake_fk
+        try:
+            def go(moveit, q0, q1):
+                mp.plan_path(moveit, np.array(q0, float), np.array(q1, float), 0.08)
+                return " | ".join(moveit.notes)
+            free = go(Fake(), [0.0, 0.2, 0, 0, 0, 0], [0.2, 0.2, 0, 0, 0, 0])
+            check("plan_path: a free straight line is taken", "straight line" in free, free)
+            blocked = go(Fake(), [0.0, 0.2, 0, 0, 0, 0], [0.8, 0.6, 0, 0, 0, 0])
+            check("plan_path: a blocked line goes up first, then straight", "straight up to 0.60" in blocked, blocked)
+            m = Fake()
+            m.barrier_top = 0.9
+            check("rise_z: RISE_CLEARANCE above a barrier taller than RISE_Z, RISE_Z otherwise",
+                  abs(mp.rise_z(m) - 1.0) < 1e-9 and mp.rise_z(Fake()) == mp.RISE_Z)
+            m.rrt_fails = 0
+            tall = go(m, [0.0, 0.2, 0, 0, 0, 0], [0.8, 0.6, 0, 0, 0, 0])
+            check("plan_path: it rises as high as the barrier needs", "straight up to 1.00" in tall, tall)
+            high = Fake()
+            noisy = go(high, [0.0, 0.7, 0, 0, 0, 0], [0.8, 0.7, 0, 0, 0, 0])
+            check("plan_path: no rise needed when already up: the straight line (valid at that height)",
+                  "straight line" in noisy, noisy)
+            retry = Fake(rrt_fails=1)
+            retry.is_valid = lambda q, width, held=None: False if 0.3 < q[0] < 0.5 else True
+            note = go(retry, [0.0, 0.2, 0, 0, 0, 0], [0.8, 0.2, 0, 0, 0, 0])
+            check("plan_path: when RRT-Connect finds nothing, it tries again for longer",
+                  retry.times == [None, mp.RRT_RETRY_TIME] and "second try" in note, note)
+        finally:
+            mp.fk = real_fk
+    run("plan_path strategies", strategies)
+
+
 def check_observation():
     print("observation configuration (exercise/state_estimation.py OBSERVATION_JOINTS)")
     from lab_replica.exercise import state_estimation as se
@@ -353,9 +477,10 @@ def check_observation():
 
 
 def main():
-    parts = sys.argv[1:] or ["task", "state", "observation", "motion"]
+    parts = sys.argv[1:] or ["task", "state", "observation", "motion", "barrier"]
     for p in parts:
-        {"task": check_task, "state": check_state, "observation": check_observation, "motion": check_motion}[p]()
+        {"task": check_task, "state": check_state, "observation": check_observation, "motion": check_motion,
+         "barrier": check_barrier}[p]()
     n_fail = RESULTS.count(False)
     print(f"{len(RESULTS) - n_fail}/{len(RESULTS)} checks passed")
     return 1 if n_fail else 0

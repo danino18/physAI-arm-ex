@@ -16,6 +16,8 @@ skills for the UR5e + RG6 + wrist RealSense cell. Nothing in here touches ROS.
                                 down, the obstacles MoveIt avoids
     skills.py                   the PDDL actions performed by the robot: (pick-up X) by
                                 pick_up(robot, X), put_on_table, put_in_basket
+    scene_model.py              a fixed barrier scanned from several views and kept clear of (the
+                                scan: command of the consoles)
     misc.py                     bonus: new-item: / forget-item: (an item measured by the camera)
 
 What these files may use from the rest of the code is in lab_replica/toolkit.py

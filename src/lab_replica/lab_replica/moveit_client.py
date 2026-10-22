@@ -118,6 +118,7 @@ class MoveIt:
             "valid": node.create_client(GetStateValidity, "/check_state_validity"),
         }
         self.obstacles = []          # names of the boxes added with set_obstacles
+        self.barrier_top = None      # the height of the fixed barrier's tallest box (motion_planning.rise_z), if any
         self.process = None          # move_group started by start()
 
     # ---- move_group ---------------------------------------------------------------------

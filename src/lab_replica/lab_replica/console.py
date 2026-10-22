@@ -219,7 +219,7 @@ class Robot:
     phases only, unless verbose)."""
 
     def __init__(self, term, sim=False, speed_scale=1.0, run_dir=None, verbose=False, return_home=True,
-                 save_frames=False, window=False):
+                 save_frames=False, window=False, barrier_file=None):
         import rclpy
         from rclpy.parameter import Parameter
         from rclpy.signals import SignalHandlerOptions
@@ -267,6 +267,8 @@ class Robot:
         self.ex = ActionExecutive(self.node, log=self._log, run_dir=self.run_dir, return_home=return_home,
                                   save_frames=save_frames)
         self._done(f"{time.time() - t0:.0f} s")
+        if barrier_file:
+            self.ex.load_barrier(barrier_file)
 
         step("checking the gripper")
         try:
@@ -392,6 +394,16 @@ class Robot:
         self.term.end_status()
         return out
 
+    # ---- the fixed barrier (scan:) -----------------------------------------------------------
+
+    def scan_barrier(self):
+        """Scan the surroundings from several views and keep the fixed barrier
+        they show. Returns (success, message)."""
+        return self._guarded(self.ex.scan_barrier)[:2]
+
+    def forget_barrier(self):
+        self.ex.forget_barrier()
+
     # ---- items added for this session (new-item:) ------------------------------------------
 
     def new_item(self, name, opts):
@@ -429,6 +441,37 @@ class Robot:
             self.viewer.close()
         self.rclpy.try_shutdown()
         self.log_file.close()
+
+
+# ---- scan: / forget-barrier: in a console --------------------------------------------------
+
+SCAN, FORGET_BARRIER = "scan:", "forget-barrier:"
+
+
+def parse_barrier_command(text):
+    """'scan:' -> "scan", 'forget-barrier:' -> "forget-barrier" (the colon may
+    be left out); None for any other line."""
+    t = text.strip().lower().rstrip(":").strip()
+    return t if t in ("scan", "forget-barrier") else None
+
+
+def barrier_hints(term):
+    term.say(term.bold("Barrier:") + f"  {SCAN} looks at the surroundings from several views and keeps clear of "
+             f"what it finds that is no item (slow: a hand on the emergency stop)   {FORGET_BARRIER}")
+
+
+def barrier_command(term, robot, cmd):
+    """Run a scan: / forget-barrier: command (parse_barrier_command). Returns
+    whether it succeeded."""
+    if cmd == "forget-barrier":
+        robot.forget_barrier()
+        term.say(term.colour("barrier forgotten", True) + ": the motions no longer keep clear of it")
+        return True
+    term.say("scanning the surroundings from several views ...")
+    ok, msg = robot.scan_barrier()
+    term.say(term.colour("barrier scanned", True) + f": {msg}" if ok else
+             term.colour("barrier not scanned", False) + f": {msg}")
+    return ok
 
 
 # ---- new-item: / forget-item: in a console -------------------------------------------------
@@ -484,6 +527,8 @@ def common_arguments(ap):
                    help="scale all motion speeds (e.g. 0.3 for a first run on the real robot)")
     g.add_argument("--no-home", action="store_true", help="do not return to the home pose after each action")
     g.add_argument("--verbose", action="store_true", help="print every step of the skills, not only the phases")
+    g.add_argument("--barrier-file", metavar="FILE",
+                   help="the fixed barrier saved by an earlier scan: (barrier.json in its run directory)")
     g.add_argument("--save-frames", action="store_true",
                    help="also save every camera frame (colour, depth, arm joints) in the run directory")
     return ap

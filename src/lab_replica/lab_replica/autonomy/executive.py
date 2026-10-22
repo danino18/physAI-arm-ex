@@ -35,6 +35,7 @@ from std_msgs.msg import Bool, Float64, String
 from .. import config, objects
 from ..exercise import misc
 from ..exercise import motion_planning as mp
+from ..exercise import scene_model as sm
 from ..exercise import skills
 from ..exercise.task_planning.planning import DOMAIN_FILE
 from ..moveit_client import MoveIt
@@ -127,6 +128,7 @@ class ActionExecutive:
         sim = node.has_parameter("use_sim_time") and node.get_parameter("use_sim_time").value
         self.mv.start(sim=bool(sim))
         self.obstacles = []      # the boxes in MoveIt's planning scene besides the table and the wall
+        self.barrier = []        # the fixed barrier's boxes (exercise/scene_model.py): always among them
         self.grip = {"detected": None, "width": None}
         node.create_subscription(Bool, "/rg6/grip_detected", lambda m: self.grip.__setitem__("detected", m.data), 10)
         node.create_subscription(Float64, "/rg6/width", lambda m: self.grip.__setitem__("width", m.data), 10)
@@ -262,13 +264,16 @@ class ActionExecutive:
         boxes = []
         if scene is not None:
             dets = {k: d for k, d in scene.detections.items() if k not in (placed or {})}
+            # What a survey sees of the fixed barrier is the barrier's boxes already.
+            unknown = [o for o in getattr(scene, "obstacles", ()) if not sm.near_barrier(o.polygon, self.barrier)]
             boxes = mp.scene_obstacles(dets, self.items, self.basket, scene.basket_xy, self.table_z,
-                                       unknown=getattr(scene, "obstacles", ()), exclude=exclude)
+                                       unknown=unknown, exclude=exclude)
         for k, p in (placed or {}).items():
             from ..planning.placement import placement_pose
             from ..robot.collision import Box, object_box
             b = object_box(self.items[k], *placement_pose(self.items[k], p), k)
             boxes.append(Box(k, b.c, b.R, b.h + mp.ITEM_PAD))
+        boxes += self.barrier
         self.mv.set_obstacles(boxes)
         self.obstacles = boxes
 
@@ -312,7 +317,7 @@ class ActionExecutive:
 
         self.set_obstacles(self.scene, exclude=exclude)
         steps, errors = first(alternatives)
-        if steps is None and self.obstacles:
+        if steps is None and len(self.obstacles) > len(self.barrier):
             self.log(f"  {errors[0] if len(errors) == 1 else 'no view reachable'}; looking without what was "
                      f"seen before")
             self.set_obstacles(None)
@@ -561,6 +566,56 @@ class ActionExecutive:
             return self.holding()
         except ActionError:
             return True
+
+    # ---- the fixed barrier ------------------------------------------------------------------
+
+    def set_barrier(self, boxes):
+        """The fixed barrier (exercise/scene_model.py): `boxes` are in MoveIt's
+        planning scene from now on, with every set of obstacles, and motions
+        rise above them (mp.rise_z)."""
+        self.barrier = list(boxes)
+        self.mv.barrier_top = sm.barrier_top(self.barrier)
+        self.set_obstacles(self.scene)
+
+    def load_barrier(self, path):
+        """The barrier saved in `path` by an earlier scan."""
+        boxes = sm.load_boxes(path)
+        self.set_barrier(boxes)
+        self.log(f"barrier: {len(boxes)} boxes from {path}")
+
+    def map_barrier(self, scene):
+        """The depth map of the barrier's surroundings from every frame of
+        `scene` (the region and the ceiling: perception.yaml's `barrier`), with
+        only what was measured in it (depth_world.py)."""
+        b = self.cfg.get("barrier", {})
+        pl = self.cell["placement"]
+        region = (b.get("x_range", pl["x_range"]), b.get("y_range", pl["y_range"]))
+        return DepthWorld(scene.depth_frames, self.cell, self.items, self.basket, scene.basket_xy, scene.detections,
+                          max_item_height=b.get("max_height", self.cfg["max_item_height"]),
+                          robot_radius=self.cfg["robot_radius"], mask_erode_px=int(self.cfg["sam3"]["mask_erode_px"]),
+                          region=region, fill_unseen=False)
+
+    def scan_barrier(self):
+        """`scan:` scan the surroundings from several views and keep the
+        fixed barrier they show (exercise/scene_model.py scan_environment).
+        Returns (success, message)."""
+        self.log("== scan: the fixed barrier")
+        self.action = "scan"
+
+        def act():
+            boxes = sm.scan_environment(self)
+            self.set_barrier(boxes)
+            if self.run_dir:
+                path = os.path.join(self.run_dir, "barrier.json")
+                sm.save_boxes(path, boxes)
+                return f"{len(boxes)} boxes of the barrier (saved in {path})"
+            return f"{len(boxes)} boxes of the barrier"
+
+        return self._perform(act, "scan")
+
+    def forget_barrier(self):
+        """`forget-barrier:` the motions need not keep clear of the barrier any more."""
+        self.set_barrier([])
 
     # ---- items added at run time ------------------------------------------------------------
 

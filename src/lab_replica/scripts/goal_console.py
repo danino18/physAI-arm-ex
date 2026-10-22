@@ -42,8 +42,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
 
-from lab_replica.console import (FORGET_ITEM, NEW_ITEM, PREDICATES, InvalidAction, Robot, Terminal,  # noqa: E402
-                                 banner, common_arguments, item_command, item_hints, parse_item_command,
+from lab_replica.console import (FORGET_BARRIER, FORGET_ITEM, NEW_ITEM, PREDICATES, SCAN, InvalidAction,  # noqa: E402
+                                 Robot, Terminal, banner, barrier_command, barrier_hints, common_arguments,
+                                 item_command, item_hints, parse_barrier_command, parse_item_command,
                                  unknown_item_hint, warn_holding_added, wrap_words)
 from lab_replica import objects  # noqa: E402
 from lab_replica.planning import pddl  # noqa: E402
@@ -85,6 +86,7 @@ def hints(term, state, added):
     term.say("         combined with " + ", ".join(CONNECTIVES) + "  (e.g. (not (on-table red-can)))")
     term.say(term.bold("Items:   ") + wrap_words(list(ITEMS) + [i + "*" for i in added], 9))
     item_hints(term, added)
+    barrier_hints(term)
     term.say(term.dim("Commands: state (show the state), reset (all items on the table, gripper empty), quit. "
                       "Tab completes names."))
 
@@ -125,7 +127,7 @@ def main():
         ITEMS[:] = task.default_items()       # the objects of the exercise's problem.pddl
     except planner.PlannerError as e:
         return f"{e}"
-    words = list(PREDICATES) + list(CONNECTIVES) + list(ITEMS) + ["state", "reset", "quit", NEW_ITEM, FORGET_ITEM]
+    words = list(PREDICATES) + list(CONNECTIVES) + list(ITEMS) + ["state", "reset", "quit", NEW_ITEM, FORGET_ITEM, SCAN, FORGET_BARRIER]
     term = Terminal(words, "goals")
     banner(term, "goal console", args.sim)
     unknown = [i for i in ITEMS if i not in objects.load_items()]
@@ -133,7 +135,8 @@ def main():
         term.say(term.colour("warning", False) + f": {', '.join(unknown)} in problem.pddl "
                  "is not an item the robot knows (config/items.yaml): the camera cannot find it")
     robot = Robot(term, sim=args.sim, speed_scale=args.speed_scale, verbose=args.verbose,
-                  return_home=not args.no_home, save_frames=args.save_frames, window=not args.no_window)
+                  return_home=not args.no_home, save_frames=args.save_frames, window=not args.no_window,
+                  barrier_file=args.barrier_file)
     state = task.most_permissive_init(ITEMS)      # every item on the table, gripper empty
     if robot.holding:
         term.say(term.colour("warning", False) + ": the gripper holds something, but the goal console starts "
@@ -164,6 +167,10 @@ def main():
                 term.say("state reset: every item on the table, the gripper empty")
                 if robot.grip():
                     term.say(term.colour("warning", False) + ": the gripper holds something")
+                continue
+            barrier_cmd = parse_barrier_command(line)
+            if barrier_cmd is not None:
+                barrier_command(term, robot, barrier_cmd)
                 continue
             try:
                 item_cmd = parse_item_command(line, robot.added)
