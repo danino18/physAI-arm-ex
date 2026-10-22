@@ -180,7 +180,7 @@ def pyramid_layout(robot, origin=None):
                       float(cfg.get("size", 0.05)), float(cfg.get("gap", 0.015)), float(cell["table"]["surface_z"]))
 
 
-def build_pyramid(term, robot, args, state, items, origin=None):
+def build_pyramid(term, robot, args, state, items, origin=None, auto=False):
     """`pyramid:` plan and build the pyramid (exercise/pyramid.py): the cubes of its size
     among `items` go into its slots, the planner choosing which and in which order. A
     pyramid that was left half built is continued. Returns the new state."""
@@ -202,21 +202,25 @@ def build_pyramid(term, robot, args, state, items, origin=None):
         term.say(term.colour("not enough cubes", False) + f": {len(free) - len(have)} more cube(s) of "
                  f"{layout.size * 1000:.0f} mm needed (new-item: <name> size={layout.size})")
         return state
-    if robot.ex.pyramid is None or robot.ex.pyramid.layout != layout:
+    current = robot.ex.pyramid
+    if current is not None and current.placed:
+        layout = current.layout             # the one being built is continued where it stands
+    else:
         if pyr.filled(state):
             term.say(term.colour("no pyramid", False) + ": cubes are in the slots of another pyramid "
                      f"({FORGET_PYRAMID} or reset first)")
             return state
+        term.say(f"checking that the area of the pyramid at ({layout.origin[0]:.2f}, {layout.origin[1]:.2f}) "
+                 "is free" + (" (or finding a free place) ..." if auto else " ..."))
+        ok, msg, layout = robot.check_pyramid_area(layout, search=auto)
+        if not ok:
+            robot.window_status("the pyramid's area is not free")
+            term.say(term.colour("the pyramid's area is not free", False) + f": {msg}")
+            term.say(term.dim(f"move what is in the way, choose another place ({PYRAMID} <x> <y>), "
+                              f"or let the robot find one ({PYRAMID} auto)"))
+            return state
+        term.say(term.colour("the pyramid's area is free", True) + f": {msg}")
         robot.start_pyramid(layout)
-    term.say(f"checking that the area of the pyramid at ({layout.origin[0]:.2f}, {layout.origin[1]:.2f}) is free ...")
-    ok, msg = robot.check_pyramid_area(layout)
-    if not ok:
-        robot.window_status("the pyramid's area is not free")
-        term.say(term.colour("the pyramid's area is not free", False) + f": {msg}")
-        term.say(term.dim("move what is in the way, or choose another place: pyramid: <x> <y>"))
-        if not robot.ex.pyramid.placed:
-            robot.forget_pyramid()
-        return state
     init = (frozenset(state) | pyr.facts(cubes)) - {("slot-free", s) for s in pyr.filled(state)}
     robot.window_status("planning the pyramid")
     term.say("planning ...")
@@ -306,7 +310,8 @@ def main():
                     term.say(term.colour("pyramid forgotten", True)
                              + ": its cubes are no longer in the state or an obstacle for the motions")
                 else:
-                    state = build_pyramid(term, robot, args, state, all_items(robot), pyramid_cmd[1]["origin"])
+                    state = build_pyramid(term, robot, args, state, all_items(robot), pyramid_cmd[1]["origin"],
+                                          pyramid_cmd[1]["auto"])
                 continue
             try:
                 item_cmd = parse_item_command(line, robot.added)

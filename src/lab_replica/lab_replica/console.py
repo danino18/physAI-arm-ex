@@ -414,9 +414,11 @@ class Robot:
 
     # ---- the pyramid (pyramid:) --------------------------------------------------------------
 
-    def check_pyramid_area(self, layout):
-        """Look and say what is in the way of the pyramid's area. Returns (success, message)."""
-        return self._guarded(lambda: self.ex.check_pyramid_area(layout))[:2]
+    def check_pyramid_area(self, layout, search=False):
+        """Look and say what is in the way of the pyramid's area (or, with `search`, find the
+        nearest free place). Returns (success, message, the layout to build)."""
+        out = self._guarded(lambda: self.ex.check_pyramid_area(layout, search))
+        return (out[0], out[1], out[2] if len(out) > 2 else layout)
 
     def start_pyramid(self, layout):
         self.ex.start_pyramid(layout)
@@ -469,8 +471,10 @@ PYRAMID, FORGET_PYRAMID = "pyramid:", "forget-pyramid:"
 
 
 def parse_pyramid_command(text):
-    """'pyramid:' -> ("pyramid", {"origin": None}); 'pyramid: 0.60 0.05' -> ("pyramid",
-    {"origin": (0.60, 0.05)}) (the middle cube of the base row); 'forget-pyramid:' ->
+    """'pyramid:' -> ("pyramid", {"origin": None, "auto": False}); 'pyramid: 0.60 0.05' ->
+    ("pyramid", {"origin": (0.60, 0.05), "auto": False}) (the middle cube of the base row);
+    'pyramid: auto' -> ("pyramid", {"origin": None, "auto": True}) (the nearest free place);
+    'forget-pyramid:' ->
     ("forget-pyramid", {}) (the colon may be left out); None for any other line. Raises
     InvalidAction for pyramid: with anything else."""
     t = text.strip().lower()
@@ -482,21 +486,24 @@ def parse_pyramid_command(text):
                     raise InvalidAction(f"{FORGET_PYRAMID} takes nothing")
                 return "forget-pyramid", {}
             if not words:
-                return "pyramid", {"origin": None}
+                return "pyramid", {"origin": None, "auto": False}
+            if words == ["auto"]:
+                return "pyramid", {"origin": None, "auto": True}
             try:
                 xy = tuple(float(w) for w in words)
             except ValueError:
                 xy = ()
             if len(xy) != 2:
-                raise InvalidAction(f"{PYRAMID} takes nothing, or the x and y [m] of the base row's middle cube, "
+                raise InvalidAction(f"{PYRAMID} takes nothing, auto, or the x and y [m] of the base row's middle cube, "
                                     f"e.g. {PYRAMID} 0.60 0.05")
-            return "pyramid", {"origin": xy}
+            return "pyramid", {"origin": xy, "auto": False}
     return None
 
 
 def pyramid_hints(term):
     term.say(term.bold("Pyramid:") + f"  {PYRAMID} builds a 3-2-1 pyramid of any cubes of the same size "
-             f"(config/cell.yaml pyramid:, or {PYRAMID} <x> <y>)   {FORGET_PYRAMID}")
+             f"(config/cell.yaml pyramid:, {PYRAMID} <x> <y>, or {PYRAMID} auto: the nearest free place)   "
+             f"{FORGET_PYRAMID}")
 
 
 # ---- scan: / forget-barrier: in a console --------------------------------------------------

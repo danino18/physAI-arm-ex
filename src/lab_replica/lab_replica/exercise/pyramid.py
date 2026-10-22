@@ -15,12 +15,14 @@ the robot has put where, and what MoveIt must keep clear of:
     Pyramid                               what was put where (the positions the robot reached), the boxes
                                           of those cubes for MoveIt, and whether the cubes are still there
     clear_of(layout, ...)                 what is in the way of the pyramid's area, or nothing
+    search(layout, ...)                   the nearest place on the board where the pyramid's area is free
 
 The cubes the robot has put are kept here and not read from the camera:
 a cube on a cube is not recognised as an item (state_estimation.
 estimate_placement), and the top view hides the cubes below.
 """
 
+import dataclasses
 import math
 from dataclasses import dataclass
 
@@ -224,3 +226,34 @@ def clear_of(layout, region, barrier=(), basket=None, others=None):
         if polygons_intersect(zone, poly, 0.0):
             problems.append(f"{name} stands within the pyramid's area")
     return problems
+
+
+def candidate_origins(layout, region, reach, step=0.02):
+    """The places (x, y) for the pyramid's middle base cube, nearest to `layout.origin`
+    first, on a grid of `step` over the board: the pyramid's area inside the board and
+    every slot between the reach `reach` = (min, max) [m] from the robot's base axis."""
+    x0, x1 = region["x_range"]
+    y0, y1 = region["y_range"]
+    out = []
+    grid = [tuple(layout.origin)] + [(float(x), float(y)) for x in np.arange(x0, x1 + 1e-9, step)
+                                     for y in np.arange(y0, y1 + 1e-9, step)]
+    for origin in grid:
+        cand = dataclasses.replace(layout, origin=origin)
+        zone = cand.zone()
+        if not (np.all(zone[:, 0] >= x0) and np.all(zone[:, 0] <= x1) and np.all(zone[:, 1] >= y0)
+                and np.all(zone[:, 1] <= y1)):
+            continue
+        if all(reach[0] <= math.hypot(*cand.nominal(s)) <= reach[1] for s in SLOTS):
+            out.append(cand.origin)
+    out.sort(key=lambda o: math.hypot(o[0] - layout.origin[0], o[1] - layout.origin[1]))
+    return out
+
+
+def search(layout, region, reach, barrier=(), basket=None, others=None, step=0.02):
+    """`layout` moved to the nearest place where nothing is in the way (clear_of),
+    or None when there is no such place on the board."""
+    for origin in candidate_origins(layout, region, reach, step):
+        cand = dataclasses.replace(layout, origin=origin)
+        if not clear_of(cand, region, barrier, basket, others):
+            return cand
+    return None

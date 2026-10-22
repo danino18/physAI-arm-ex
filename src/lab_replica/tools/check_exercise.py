@@ -599,6 +599,17 @@ def check_pyramid():
               len(pyr.clear_of(L, board, basket=(0.60, 0.20, 0.13))) == 1
               and len(pyr.clear_of(L, board, others={"red-can": pyr.circle_polygon((0.62, 0.0), 0.03)})) == 1
               and len(pyr.clear_of(Layout((0.74, 0.0)), board)) == 1)
+        reach = (0.20, 0.74)
+        found = pyr.search(L, board, reach, basket=(0.60, 0.20, 0.13),
+                           others={"red-can": pyr.circle_polygon((0.62, 0.0), 0.03)})
+        check("search: with the basket and an item on the default place, the nearest free place that the arm reaches",
+              found is not None and found.origin != L.origin and pyr.clear_of(found, board, basket=(0.60, 0.20, 0.13),
+                                                                               others={"red-can": pyr.circle_polygon((0.62, 0.0), 0.03)}) == []
+              and all(reach[0] <= math.hypot(*found.nominal(s)) <= reach[1] for s in pyr.SLOTS),
+              f"origin {None if found is None else tuple(round(v, 2) for v in found.origin)}")
+        check("search: the default place when it is free, and None when no place on the board is",
+              pyr.search(L, board, reach).origin == L.origin
+              and pyr.search(L, board, reach, others={"a table": pyr.circle_polygon((0.43, 0.0), 0.9)}) is None)
         P = Pyramid(L)
         P.put("base-left", "red-block", 0.60, -0.065)
         P.put("base-mid", "blue-block", 0.60, 0.0)
@@ -616,6 +627,17 @@ def check_pyramid():
         check("check_cubes: reads the heights at the slots' centres",
               pyr.check_cubes(P, lambda X, Y: np.where(X < 0.0, np.nan, 0.12)) == [])
     run("pyramid obstacles", obstacles)
+
+    def commands():
+        from lab_replica.console import parse_pyramid_command as parse
+        got = [parse(t) for t in ("pyramid:", "pyramid", "pyramid: auto", "pyramid: 0.6 0.05", "forget-pyramid:",
+                                  "pyramids", "scan:")]
+        want = [("pyramid", {"origin": None, "auto": False}), ("pyramid", {"origin": None, "auto": False}),
+                ("pyramid", {"origin": None, "auto": True}), ("pyramid", {"origin": (0.6, 0.05), "auto": False}),
+                ("forget-pyramid", {}), None, None]
+        check("parse_pyramid_command: pyramid:, pyramid: auto, pyramid: x y, forget-pyramid:, nothing else",
+              got == want, str(got))
+    run("parse_pyramid_command", commands)
 
     def executive_scene():
         # robot.set_obstacles with a pyramid: a stand-in executive that records what goes to MoveIt.

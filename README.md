@@ -739,6 +739,7 @@ new-item: black-block size=0.05
 new-item: pink-block size=0.05
 scan:                               # the obstacle, before the pyramid
 pyramid:                            # the place in config/cell.yaml (pyramid:), or  pyramid: 0.60 0.05
+pyramid: auto                       # the nearest place on the board where the area is free
 ```
 
 The cubes are the items of kind `block` of the pyramid's edge (`size`, 5 cm: the
@@ -748,8 +749,10 @@ the layers). The slots are in
 [`exercise/pyramid.py`](src/lab_replica/lab_replica/exercise/pyramid.py);
 the place is the base row's middle cube (`origin`), its direction (`axis_yaw_deg`,
 90: along y) and the gap between neighbours. The area round the row (6 cm more on
-every side) must be free of the basket, the obstacle and other items; `pyramid:`
-looks first and says what is in the way.
+every side) must be free of the basket, the obstacle and other items (also the cubes
+that are to be picked up: they stand in the way of the base); `pyramid:` looks
+first and says what is in the way. `pyramid: auto` then looks for the nearest place
+on the board where nothing is and the arm reaches every slot, and says where it is.
 
 The planner (UPF and Fast Downward) chooses which cube goes into which slot
 and the order, with the domain's one more action

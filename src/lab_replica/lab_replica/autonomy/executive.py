@@ -635,34 +635,45 @@ class ActionExecutive:
         cubes are kept clear of from now on; the one before is forgotten."""
         self.pyramid = pyr.Pyramid(layout)
 
-    def check_pyramid_area(self, layout):
+    def check_pyramid_area(self, layout, search=False):
         """`pyramid:` look at the table and say what is in the way of the
-        pyramid's area: (success, message). Success when nothing is (the
-        obstacle, the basket and the items are what it is checked against;
-        once cubes stand in the pyramid they are not looked at again)."""
+        pyramid's area: (success, message, layout). Success when nothing is
+        (the obstacle, the basket and the items are what it is checked
+        against), and `layout` is the one to build. With `search`, when the
+        area is not free, the nearest place on the board where it is
+        (pyramid.search) is chosen."""
         self.log("== pyramid: is its area free?")
         self.action = "pyramid area"
-        if self.pyramid is not None and self.pyramid.layout == layout and self.pyramid.placed:
-            return True, "the pyramid's area is the one it was started in"
+        found = {"layout": layout}
 
         def act():
             scene = self.survey(se.OBSERVATION_JOINTS)
             others = {k: self.items[k].footprint_world(d.estimate.placement.rest, d.estimate.placement.x,
                                                        d.estimate.placement.y, d.estimate.placement.yaw)
                       for k, d in scene.detections.items()}
-            for i, o in enumerate(getattr(scene, "obstacles", ())):
+            for o in getattr(scene, "obstacles", ()):
+                c = o.polygon.mean(axis=0)
                 if o.support == "table" and not sm.near_barrier(o.polygon, self.barrier):
-                    others[f"an unknown obstacle at ({o.polygon.mean(axis=0)[0]:.2f}, {o.polygon.mean(axis=0)[1]:.2f})"] = o.polygon
+                    others[f"an unknown obstacle at ({c[0]:.2f}, {c[1]:.2f})"] = o.polygon
             basket = None
             if scene.basket_xy is not None:
                 basket = (float(scene.basket_xy[0]), float(scene.basket_xy[1]), self.basket.r_top + 0.01)
-            problems = pyr.clear_of(layout, self.cell["placement"], self.barrier, basket, others)
-            if problems:
-                raise ActionError("; ".join(problems))
-            return "the pyramid's area is free"
+            region = self.cell["placement"]
+            problems = pyr.clear_of(layout, region, self.barrier, basket, others)
+            if not problems:
+                return "the pyramid's area is free"
+            if search:
+                reach = (float(region["min_reach"]), float(region["max_reach"]))
+                moved = pyr.search(layout, region, reach, self.barrier, basket, others)
+                if moved is not None:
+                    found["layout"] = moved
+                    return (f"({layout.origin[0]:.2f}, {layout.origin[1]:.2f}) is not free ({'; '.join(problems)}): "
+                            f"the pyramid goes at ({moved.origin[0]:.2f}, {moved.origin[1]:.2f})")
+                raise ActionError("no free place for the pyramid on the board (" + "; ".join(problems) + ")")
+            raise ActionError("; ".join(problems))
 
         ok, msg = self._perform(act, "pyramid area")
-        return ok, msg
+        return ok, msg, found["layout"]
 
     def forget_pyramid(self):
         """`forget-pyramid:` the cubes put in the pyramid are no obstacle in the planning scene any more."""
