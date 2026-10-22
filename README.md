@@ -120,6 +120,7 @@ linked, so editing them needs no new build).
 | `skills.py` | `pick_up` | `(pick-up X)`: check the gripper is empty, look (also from the side when X is not recognised from above, then from closer), find X, propose grasps in the image, plan the grasp, grasp, check the grip | every action |
 | | `put_on_table` | `(put-on-table X)`: check the gripper holds X, look, find a free table spot, put X there, check it let go | every action |
 | | `put_in_basket` | `(put-in-basket X)`: check the gripper holds X, look, find the basket's emptiest spot, drop X there, check it let go | every action |
+| `pyramid.py` | `Layout`, `Pyramid`, `facts`, `clear_of` | `pyramid:` in the goal console: where the six slots of a 3-2-1 pyramid are, what was put where, what is in the way ([A pyramid of cubes](#a-pyramid-of-cubes)); `skills.py` `place_in_slot` puts a cube in a slot | `pyramid:` in the goal console |
 | `scene_model.py` | `scan_environment`, `static_obstacles`, `boxes_from_height_map` | `scan:` in a console: the views a fixed barrier is scanned from, and its boxes from the height map of those views (see [What the robot keeps clear of](#what-the-robot-keeps-clear-of)) | `scan:` in a console |
 | `misc.py` (bonus) | `new_item` | `new-item: NAME`: find an unknown item by its text prompt (SAM 3), measure it, add it | `new-item:` in a console |
 | | `forget_item` | `forget-item: NAME`: forget an added item | `forget-item:` in a console |
@@ -726,6 +727,51 @@ the camera live, and every view of every action of the plan, annotated.
 **Options:** `--step` (press Enter before every action of a plan; `n` stops),
 and the same options as the action console (`--no-window` too).
 
+### A pyramid of cubes
+
+`pyramid:` in the goal console builds a pyramid of six cubes of the same
+edge (three in a row, two on them, one on the top), out of any cubes on the
+table, without touching the [obstacle](#what-the-robot-keeps-clear-of):
+
+```text
+new-item: white-block size=0.05     # cubes that are not in config/items.yaml: once per cube and session
+new-item: black-block size=0.05
+new-item: pink-block size=0.05
+scan:                               # the obstacle, before the pyramid
+pyramid:                            # the place in config/cell.yaml (pyramid:), or  pyramid: 0.60 0.05
+pyramid: auto                       # the nearest place on the board where the area is free
+```
+
+The cubes are the items of kind `block` of the pyramid's edge (`size`, 5 cm: the
+orange block is 4 cm and is left out; `new-item: ... size=` makes a cube of an
+exact edge without measuring it: a few millimetres of error would add up in
+the layers). The slots are in
+[`exercise/pyramid.py`](src/lab_replica/lab_replica/exercise/pyramid.py);
+the place is the base row's middle cube (`origin`), its direction (`axis_yaw_deg`,
+90: along y) and the gap between neighbours. The area round the row (4 cm more on
+every side) must be free of the basket, the obstacle and other items (also the cubes
+that are to be picked up: they stand in the way of the base); `pyramid:` looks
+first and says what is in the way. `pyramid: auto` then looks for the nearest place
+on the board where nothing is and the arm reaches every slot, and says where it is.
+
+The planner (UPF and Fast Downward) chooses which cube goes into which slot
+and the order, with the domain's one more action
+`(place-in-slot ?cube ?slot)` (`domain.pddl`: a base slot, or one whose two
+supporting slots are taken): twelve actions, a `pick-up` and a `place-in-slot`
+for each cube. `place_in_slot` (`skills.py`) looks, checks that the cubes put
+before are still there (their height in the depth map), puts the cube at the middle of
+the two it rests on as the robot put them (not as the layout says, so an error of
+a few millimetres in the base does not add up), turned along the row, with the
+fingers closing across it, and releases it 4 mm above them. The pyramid's cubes are
+kept by the robot (a cube on a cube is not recognised as an item) and are boxes in
+MoveIt's planning scene for every motion, but the ones the cube rests on.
+
+If an action fails, `pyramid:` again continues from the state (`--step` waits
+for Enter before every action). `forget-pyramid:` (and `reset`) forget it;
+`scan:` refuses while a pyramid stands (its upper cubes would be taken for the
+obstacle).
+Check it offline with `python3 src/lab_replica/tools/check_exercise.py pyramid`.
+
 ## What the robot keeps clear of
 
 Every motion is planned by MoveIt (`exercise/motion_planning.py`), which
@@ -774,7 +820,7 @@ forget-barrier:    # the motions no longer keep clear of it
 The depth of all the views goes into the same height map, over the larger
 region of `barrier:` in `config/perception.yaml` (only what was measured, not
 the space no view saw); what no item, the basket or the table explains is
-the candidate, and the tallest piece of at least 16 cm^2 (`tallest_piece`) is
+the candidate (only what at least two views saw: the arm, or a hand, in one view is not an obstacle), and the tallest piece of at least 16 cm^2 (`tallest_piece`) is
 the obstacle. It becomes a few boxes (oriented along a slanted wall, one per
 height of a stepped one; `static_obstacles`), which are in MoveIt's planning
 scene with every motion from then on, and which the motions rise above

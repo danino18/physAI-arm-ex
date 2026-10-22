@@ -2,6 +2,7 @@
 
     new-item: purple-block prompt="purple block"   ->  new_item(robot, "purple-block", "purple block")
     new-item: lid shape=round                      ->  new_item(robot, "lid", "lid", "round")
+    new-item: white-block size=0.05                ->  new_item(robot, "white-block", "white block", None, 0.05)
     forget-item: purple-block                      ->  forget_item(robot, "purple-block")
 
 new_item returns (spec, message) or raises ActionError / PlanError, like
@@ -34,11 +35,16 @@ from . import state_estimation as se
 MIN_POINTS = 30          # depth points a mask needs to count as an item
 
 
-def new_item(robot, name, prompt, shape=None):
+def new_item(robot, name, prompt, shape=None, size=None):
     """Find an item that is not known yet on the table by its text prompt,
     measure it (shape "box" or "round", or None to tell from its points) and
     add it as `name`. Returns (spec, message); the spec is an
-    objects/measured.py spec."""
+    objects/measured.py spec.
+
+    With `size` (the edge of a wooden cube, as the block items of items.yaml)
+    it is a cube of exactly that size: it is only looked for, not measured
+    (a few mm of error in a measurement would add up in a pyramid of
+    cubes); the spec is an objects/block.py spec."""
     if robot.holding():
         raise ActionError("the gripper is holding something: put it down first, then measure the new item")
     scene = robot.survey(se.OBSERVATION_JOINTS)
@@ -55,6 +61,13 @@ def new_item(robot, name, prompt, shape=None):
     c = np.median(pts[:, :2], axis=0)
     robot.log(f"  {prompt!r} found with score {score:.2f} at ({c[0]:.3f}, {c[1]:.3f})")
     notes = []
+    if size is not None:
+        color = np.median(frame.rgb[mask], axis=0) / 255.0
+        spec = {"kind": "block", "size": float(size), "mass": 0.075,
+                "color": [round(float(v), 3) for v in color], "stable_poses": ["flat"], "prompts": [prompt]}
+        robot.add_item(name, spec)
+        robot.log(f"  {name}: a cube of {size * 1000:.0f} mm (given, not measured)")
+        return spec, f"{name} is a {size * 1000:.0f} mm cube, SAM 3 score {score:.2f}"
     try:
         close = robot.survey(se.close_views(c[0], c[1]), scene).frames[-1]
     except PlanError:

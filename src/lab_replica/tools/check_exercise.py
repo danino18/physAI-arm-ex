@@ -6,7 +6,7 @@ known plan, an arm configuration, the board seen from the observation
 configuration) and compares.
 
     python3 src/lab_replica/tools/check_exercise.py              # everything
-    python3 src/lab_replica/tools/check_exercise.py task state   # some parts: task, state, observation, motion, barrier
+    python3 src/lab_replica/tools/check_exercise.py task state   # some parts: task, state, observation, motion, barrier, pyramid
 
 (In the clone's top directory, after `source /opt/ros/humble/setup.bash &&
 source install/setup.bash && source .venv/bin/activate`.) The motions
@@ -434,7 +434,6 @@ def check_barrier():
         prisms = [(box(0.25, 0.0, 0.04), 0.45), (box(0.55, 0.10, 0.05), 0.15)]
         frames = [Seen(x, y, 0.85, prisms) for x, y in ((0.2, 0.0), (0.7, 0.0), (0.45, -0.2), (0.45, 0.2))]
         cell = config.load_cell()
-        pl = cell["placement"]
         args = (frames, cell, objects.load_items(), objects.load_basket(cell), None, {})
         kw = dict(max_item_height=0.6, robot_radius=0.17, region=([-0.1, 0.9], [-0.38, 0.36]), fill_unseen=False)
         fixed = sm.static_obstacles(DepthWorld(*args, base_height=0.24, **kw))
@@ -445,6 +444,44 @@ def check_barrier():
               f"{len(fixed)} boxes, top {sm.barrier_top(fixed)}; without base_height: "
               f"{[np.round(b.c[:2], 2).tolist() for b in broken]}")
     run("arm over the base", arm_over_the_base)
+
+    def one_view_only():
+        # The cube is in every view; something tall (the arm, a hand) in one view only: not an obstacle.
+        from lab_replica.autonomy.depth_world import DepthWorld
+        from lab_replica.exercise.state_estimation import pixels_to_world
+
+        class Seen(Frame):
+            q = None
+
+            def points_world(self, mask=None, stride=1):
+                H, W = self.depth.shape
+                vv, uu = np.mgrid[0:H:stride, 0:W:stride]
+                d = self.depth[::stride, ::stride]
+                ok = np.isfinite(d) & (d > 0)
+                return pixels_to_world(uu[ok], vv[ok], d[ok], self.K, self.T_world_cam)
+
+            def project(self, P):
+                T = np.linalg.inv(self.T_world_cam)
+                C = np.atleast_2d(P) @ T[:3, :3].T + T[:3, 3]
+                return np.stack([self.K[0, 0] * C[:, 0] / C[:, 2] + self.K[0, 2],
+                                 self.K[1, 1] * C[:, 1] / C[:, 2] + self.K[1, 2]], axis=1), C[:, 2]
+        box = lambda x, y, r: [(x - r, y - r), (x + r, y - r), (x + r, y + r), (x - r, y + r)]  # noqa: E731
+        cube = (box(0.55, 0.10, 0.05), 0.12)
+        stray = (box(0.45, -0.10, 0.05), 0.40)        # 40 cm high, in one view only
+        frames = [Seen(0.2, 0.0, 0.85, [cube]), Seen(0.7, 0.0, 0.85, [cube]),
+                  Seen(0.45, -0.2, 0.85, [cube, stray]), Seen(0.45, 0.2, 0.85, [cube])]
+        cell = config.load_cell()
+        args = (frames, cell, objects.load_items(), objects.load_basket(cell), None, {})
+        world = DepthWorld(*args, max_item_height=0.6, robot_radius=0.17, region=([-0.1, 0.9], [-0.38, 0.36]),
+                           fill_unseen=False, base_height=0.24)
+        kept = sm.static_obstacles(world)
+        everything = sm.static_obstacles(world, persistent=False)
+        check("the obstacle is what several views saw: the cube, not what one view saw",
+              len(kept) == 1 and abs(kept[0].c[0] - 0.55) < 0.08 and abs(sm.barrier_top(kept) - 0.14) < 0.011
+              and abs(everything[0].c[0] - 0.45) < 0.08,
+              f"{len(kept)} boxes at {[np.round(b.c[:2], 2).tolist() for b in kept]}; without agreement the tallest is at "
+              f"{[np.round(b.c[:2], 2).tolist() for b in everything]}")
+    run("one view only", one_view_only)
 
     def commands():
         from lab_replica.console import parse_barrier_command as parse
@@ -513,6 +550,295 @@ def check_barrier():
     run("plan_path strategies", strategies)
 
 
+# ---- the pyramid (exercise/pyramid.py, domain.pddl place-in-slot) -------------------------------------
+
+
+def check_pyramid():
+    print("pyramid (exercise/pyramid.py; the planner with UPF and Fast Downward)")
+    from lab_replica.exercise import pyramid as pyr
+    from lab_replica.exercise import scene_model as sm
+    from lab_replica.exercise.pyramid import Layout, Pyramid
+    items = objects.load_items()
+
+    def geometry():
+        L = Layout((0.60, 0.05), axis_yaw=math.pi / 2, size=0.05, gap=0.015)
+        b = {s: L.position(s) for s in pyr.BASE}
+        check("Layout: the base row is along the axis, a cube and a gap apart, the middle one at the origin",
+              np.allclose([b["base-mid"][0], b["base-mid"][1]], [0.60, 0.05]) and np.allclose(
+                  [b["base-right"][1] - b["base-mid"][1], b["base-mid"][1] - b["base-left"][1]], [0.065, 0.065])
+              and all(abs(v[0] - 0.60) < 1e-9 and v[2] == 0.0 for v in b.values()))
+        m, t = L.position("mid-left"), L.position("top")
+        check("Layout: a cube above rests on the middle of the two below, one cube higher",
+              np.allclose(m[:2], [0.60, 0.05 - 0.0325]) and abs(m[2] - 0.05) < 1e-9
+              and np.allclose(t[:2], [0.60, 0.05]) and abs(t[2] - 0.10) < 1e-9)
+        placed = {"base-left": (0.601, 0.080), "base-mid": (0.598, 0.145)}
+        got = L.position("mid-left", placed)
+        check("Layout.position: the middle of where the two cubes below were put, not of the layout",
+              np.allclose(got[:2], [(0.601 + 0.598) / 2, (0.080 + 0.145) / 2]))
+        diag = Layout((0.5, 0.0), axis_yaw=math.radians(45))
+        d = np.array(diag.nominal("base-right")) - np.array(diag.nominal("base-left"))
+        check("Layout: a row at 45 degrees", abs(d[0] - d[1]) < 1e-9 and abs(np.hypot(*d) - 2 * diag.pitch) < 1e-9)
+        check("Layout.in_zone: the cubes are in the pyramid's area, a point 20 cm off is not",
+              all(L.in_zone(L.nominal(s)) for s in pyr.SLOTS) and not L.in_zone((0.60, 0.05 + 0.25))
+              and not L.in_zone((0.60 + 0.2, 0.05)))
+    run("Layout", geometry)
+
+    def planning():
+        cubes = pyr.cubes_of(items, 0.05)
+        check("cubes_of: the 5 cm blocks, not the 4 cm orange one",
+              cubes == ["blue-block", "green-block", "red-block", "yellow-block"], str(cubes))
+        names = list(items) + ["white-block", "black-block", "pink-block"]
+        from lab_replica.tamp import planner, task
+        state = frozenset({("on-table", i) for i in names} | {("robot-gripper-empty",)})
+        every = cubes + ["white-block", "black-block", "pink-block"]
+        try:
+            plan = task.solve(state | pyr.facts(every), pyr.goal(), log=lambda s: None, items=names, slots=pyr.SLOTS)
+        except planner.PlannerError as e:
+            check("the planner builds the pyramid", False, str(e))
+            return
+        place = [a for a in plan if a.startswith("(place-in-slot")]
+        order = [a.split()[2].rstrip(")") for a in place]
+        used = [a.split()[1] for a in place]
+        check("the plan: 12 actions, a pick-up before every placement, six different cubes",
+              len(plan) == 12 and len(set(used)) == 6 and set(used) <= set(every),
+              f"{len(plan)} actions, cubes {sorted(used)}")
+        check("the plan: the base before the middle before the top",
+              order.index("mid-left") > max(order.index("base-left"), order.index("base-mid"))
+              and order.index("mid-right") > max(order.index("base-mid"), order.index("base-right"))
+              and order[-1] == "top", " ".join(order))
+        check("the plan's last state: every slot taken",
+              set(pyr.filled(plan.states[-1])) == set(pyr.SLOTS))
+        few = frozenset({("on-table", c) for c in cubes[:4]} | {("robot-gripper-empty",)})
+        try:
+            task.solve(few | pyr.facts(cubes[:4]), pyr.goal(), log=lambda s: None, items=names, slots=pyr.SLOTS)
+            unsolvable = False
+        except planner.Unsolvable:
+            unsolvable = True
+        check("with only four cubes the pyramid cannot be built", unsolvable)
+        # Half built: the rest is planned from there.
+        half = frozenset(state | {("in-slot", "black-block", "base-left"), ("in-slot", "blue-block", "base-mid")})
+        half = half - {("on-table", "black-block"), ("on-table", "blue-block")}
+        init = (half | pyr.facts(every)) - {("slot-free", "base-left"), ("slot-free", "base-mid")}
+        rest = task.solve(init, pyr.goal(), log=lambda s: None, items=names, slots=pyr.SLOTS)
+        check("a pyramid left half built is continued: 8 actions for the four slots left",
+              len(rest) == 8 and all("base-left" not in a and "base-mid" not in a for a in rest), f"{len(rest)} actions")
+    run("planning the pyramid", planning)
+
+    def obstacles():
+        L = Layout((0.60, 0.0), axis_yaw=math.pi / 2)
+        board = {"x_range": (0.093, 0.773), "y_range": (-0.28, 0.29)}
+        check("clear_of: a free area has nothing in its way", pyr.clear_of(L, board) == [])
+        wall = sm.Box("barrier 0", [0.60, 0.14, 0.08], np.eye(3), [0.03, 0.03, 0.08])
+        near = pyr.clear_of(L, board, barrier=[wall])
+        far = pyr.clear_of(L, board, barrier=[sm.Box("barrier 0", [0.30, -0.20, 0.08], np.eye(3), [0.03, 0.03, 0.08])])
+        check("clear_of: the obstacle within 4 cm of the row is in the way, one far off is not",
+              len(near) == 1 and "obstacle" in near[0] and far == [], str(near))
+        check("clear_of: the basket, an item and the board's edge",
+              len(pyr.clear_of(L, board, basket=(0.60, 0.20, 0.13))) == 1
+              and len(pyr.clear_of(L, board, others={"red-can": pyr.circle_polygon((0.62, 0.0), 0.03)})) == 1
+              and len(pyr.clear_of(Layout((0.74, 0.0)), board)) == 1)
+        reach = (0.20, 0.74)
+        found = pyr.search(L, board, reach, basket=(0.60, 0.20, 0.13),
+                           others={"red-can": pyr.circle_polygon((0.62, 0.0), 0.03)})
+        check("search: with the basket and an item on the default place, the nearest free place that the arm reaches",
+              found is not None and found.origin != L.origin and pyr.clear_of(found, board, basket=(0.60, 0.20, 0.13),
+                                                                               others={"red-can": pyr.circle_polygon((0.62, 0.0), 0.03)}) == []
+              and all(reach[0] <= math.hypot(*found.nominal(s)) <= reach[1] for s in pyr.SLOTS),
+              f"origin {None if found is None else tuple(round(v, 2) for v in found.origin)}")
+        check("search: the default place when it is free, and None when no place on the board is",
+              pyr.search(L, board, reach).origin == L.origin
+              and pyr.search(L, board, reach, others={"a table": pyr.circle_polygon((0.43, 0.0), 0.9)}) is None)
+        P = Pyramid(L)
+        P.put("base-left", "red-block", 0.60, -0.065)
+        P.put("base-mid", "blue-block", 0.60, 0.0)
+        P.put("mid-left", "green-block", 0.60, -0.0325)
+        check("Pyramid.boxes: a box per cube at its height, but those of the slots skipped",
+              len(P.boxes()) == 3 and len(P.boxes(skip=("base-left", "base-mid"))) == 1
+              and abs(P.boxes(skip=("base-left", "base-mid"))[0].c[2] - 0.075) < 1e-9
+              and abs(P.boxes()[0].c[2] - 0.025) < 1e-9 and P.items() == {"red-block", "blue-block", "green-block"})
+        check("Pyramid.boxes: a box is larger than the cube by PAD on every side",
+              np.allclose(P.boxes()[0].h, 0.025 + pyr.PAD))
+        top = {"base-left": 0.05, "base-mid": 0.05, "mid-left": 0.10}
+        gone = {"base-left": 0.05, "base-mid": float("nan"), "mid-left": 0.04}
+        check("Pyramid.missing: the cubes whose slot shows nothing or too low a top",
+              P.missing(top) == [] and sorted(P.missing(gone)) == ["base-mid", "mid-left"])
+        check("check_cubes: reads the heights at the slots' centres",
+              pyr.check_cubes(P, lambda X, Y: np.where(X < 0.0, np.nan, 0.12)) == [])
+    run("pyramid obstacles", obstacles)
+
+    def commands():
+        from lab_replica.console import parse_pyramid_command as parse
+        got = [parse(t) for t in ("pyramid:", "pyramid", "pyramid: auto", "pyramid: 0.6 0.05", "forget-pyramid:",
+                                  "pyramids", "scan:")]
+        want = [("pyramid", {"origin": None, "auto": False}), ("pyramid", {"origin": None, "auto": False}),
+                ("pyramid", {"origin": None, "auto": True}), ("pyramid", {"origin": (0.6, 0.05), "auto": False}),
+                ("forget-pyramid", {}), None, None]
+        check("parse_pyramid_command: pyramid:, pyramid: auto, pyramid: x y, forget-pyramid:, nothing else",
+              got == want, str(got))
+    run("parse_pyramid_command", commands)
+
+    def executive_scene():
+        import types as _types
+        # robot.set_obstacles with a pyramid: a stand-in executive that records what goes to MoveIt.
+        for _ in range(30):                 # without ROS (the checks need none): stand-ins for its modules
+            try:
+                from lab_replica.autonomy.executive import ActionExecutive
+                break
+            except ModuleNotFoundError as e:
+                if e.name is None or e.name.split(".")[0] not in ("rclpy", "std_msgs", "sensor_msgs", "geometry_msgs",
+                                                                  "control_msgs", "moveit_msgs", "shape_msgs", "tf2_ros",
+                                                                  "builtin_interfaces", "trajectory_msgs", "rcl_interfaces",
+                                                                  "lab_skills_msgs", "cv_bridge", "action_msgs"):
+                    raise
+                import unittest.mock
+                parts = e.name.split(".")
+                for k in range(1, len(parts) + 1):
+                    sys.modules.setdefault(".".join(parts[:k]), unittest.mock.MagicMock())
+        L = Layout((0.60, 0.0), axis_yaw=math.pi / 2)
+        sent = []
+
+        class Mv:
+            def set_obstacles(self, boxes):
+                sent.append(list(boxes))
+        ex = ActionExecutive.__new__(ActionExecutive)
+        ex.mv, ex.items, ex.table_z, ex.barrier, ex.obstacles = Mv(), items, 0.0, [], []
+        ex.pyramid = Pyramid(L)
+        ex.pyramid.put("base-left", "red-block", 0.60, -0.065)
+        ex.pyramid.put("base-mid", "blue-block", 0.60, 0.0)
+        ex.cell = {"placement": {"min_reach": 0.20, "max_reach": 0.74}}
+        ex.scene = _types.SimpleNamespace(detections={
+            n: _types.SimpleNamespace(estimate=_types.SimpleNamespace(placement=_types.SimpleNamespace(x=x, y=y)))
+            for n, (x, y) in {"near": (0.45, 0.0), "far": (0.92, 0.02), "close": (0.10, 0.05)}.items()})
+        check("out_of_reach: the items beyond the arm's reach or too near its base",
+              sorted(ex.out_of_reach(["near", "far", "close", "unseen"])) == ["close", "far"])
+        ex.scene = None
+        ex.set_obstacles(None, skip_slots=("base-left",))
+        check("set_obstacles: the pyramid's cubes, but the ones the cube rests on",
+              len(sent[-1]) == 1 and abs(sent[-1][0].c[1]) < 1e-9, f"{len(sent[-1])} boxes")
+        ex.barrier = [sm.Box("barrier 0", [0.3, -0.2, 0.08], np.eye(3), [0.03, 0.03, 0.08])]
+        ex.set_obstacles(None)
+        check("set_obstacles: and the fixed obstacle besides", len(sent[-1]) == 3 and sent[-1][-1].name == "barrier 0")
+        # An item forgotten (forget-item:) after the last look is still in that look's detections.
+        gone = _types.SimpleNamespace(estimate=_types.SimpleNamespace(placement=None))
+        stale = _types.SimpleNamespace(detections={"white-block": gone}, basket_xy=None, obstacles=[])
+        ex.pyramid, ex.basket = None, None
+        try:
+            ex.set_obstacles(stale)
+            ok = True
+        except KeyError:
+            ok = False
+        check("set_obstacles: an item that was forgotten since the look is no obstacle and no error", ok)
+        ex.scene, ex.perception = stale, _types.SimpleNamespace(remove_prompts=lambda name: None)
+        ex.items = dict(items)
+        ex.items["white-block"] = items["yellow-block"]
+        ex.remove_item("white-block")
+        check("remove_item: also from the last look", "white-block" not in stale.detections
+              and "white-block" not in ex.items)
+        from lab_replica.autonomy import executive as ex_mod
+
+        class Refused(Exception):
+            pass
+        ex.return_home, ex.log, ex.phase = True, lambda text: None, lambda text: None
+
+        def refuse():
+            raise Refused("home: trajectory rejected")
+        ex.go_home = refuse
+        ok, said = ex._perform(lambda: "put it", "an action")
+        check("an action that is done stays done when the robot refuses the way home",
+              ok and said.startswith("put it") and "could not return home" in said, f"{ok}, {said}")
+        found = ex_mod.skill_functions(ex_mod.domain_actions())
+        check("every action of domain.pddl has its skill, place-in-slot among them",
+              {"pick-up", "put-on-table", "put-in-basket", "place-in-slot"} <= set(found), ", ".join(sorted(found)))
+    run("set_obstacles with a pyramid", executive_scene)
+
+    def skill():
+        # place_in_slot against a stand-in robot: where it puts the cube, what it keeps clear of, what it checks.
+        import types
+
+        from lab_replica.exercise import motion_planning as mp
+        from lab_replica.exercise import skills
+        from lab_replica.toolkit import ActionError, Held
+        L = Layout((0.60, 0.0), axis_yaw=math.pi / 2)
+
+        all_items = items
+
+        class Robot:
+            force = 20.0
+
+            def __init__(self, heights):
+                self.items, self.mv = all_items, None
+                self.pyramid, self.heights, self.skipped, self.put_at, self.log_lines = Pyramid(L), heights, [], [], []
+                self.held = types.SimpleNamespace(item="yellow-block", assumed=False,
+                                                  held=Held("yellow-block", "flat", 0.05, 0.008, (0.0, 0.0), 0.0, 0.05))
+
+            def holding(self): return self.held is not None
+            def width(self): return 0.05
+            def current(self): return np.zeros(6)
+            def log(self, text): self.log_lines.append(text)
+            def phase(self, text): pass
+            def wait(self, seconds): pass
+            def now_empty(self): self.held = None
+            def placed(self, item, target): self.put_at.append((item, target))
+            def run(self, steps): self.ran, self.held = steps, None      # the cube is let go
+
+            def survey(self, view, held=None, exclude=()):
+                return types.SimpleNamespace(detections={}, depth=types.SimpleNamespace(
+                    heights_at=lambda X, Y, radius=0.0, items=(): np.array([self.heights.get(round(float(x), 3), np.nan)
+                                                                           for x in X])))
+
+            def set_obstacles(self, scene, exclude=(), skip_slots=()): self.skipped.append(tuple(skip_slots))
+        real = mp.plan_place_at, mp.held_box
+        calls = []
+        mp.held_box = lambda held, model: None
+        mp.plan_place_at = lambda mv, q0, held, box, x, y, z, yaws, force, gap=0.004: (calls.append((x, y, z, list(yaws)))
+                                                                                       or (yaws[0], ["steps"]))
+        try:
+            r = Robot({})
+            skills.place_in_slot(r, "yellow-block", "base-mid")
+            x, y, z, yaws = calls[-1]
+            check("place_in_slot: a base slot at the layout's place, on the table, the cube turned along the row",
+                  np.allclose([x, y, z], [0.60, 0.0, 0.0]) and r.pyramid.placed["base-mid"][0] == "yellow-block"
+                  and r.skipped[-1] == () and r.put_at[-1][1].z_support == 0.0
+                  and abs(math.sin(yaws[0] - L.axis_yaw)) < 1e-9, f"{calls[-1][:3]}")
+            r.held = types.SimpleNamespace(item="yellow-block", assumed=False,
+                                           held=Held("yellow-block", "flat", 0.05, 0.008, (0.0, 0.0), 0.0, 0.05))
+            r.pyramid.put("base-left", "red-block", 0.60, -0.066)     # off the layout by 1 mm
+            r.heights = {0.6: 0.05}
+            skills.place_in_slot(r, "yellow-block", "mid-left")
+            x, y, z, _ = calls[-1]
+            check("place_in_slot: a slot above at the middle of the cubes below as the robot put them, one cube "
+                  "higher, and the cubes it rests on are not obstacles",
+                  np.allclose([x, y, z], [0.60, (-0.066 + 0.0) / 2, 0.05]) and r.skipped[-1] == ("base-left", "base-mid"),
+                  f"{calls[-1][:3]}, skipped {r.skipped[-1]}")
+            r.held = types.SimpleNamespace(item="yellow-block", assumed=False,
+                                           held=Held("yellow-block", "flat", 0.05, 0.008, (0.0, 0.0), 0.0, 0.05))
+            r.heights = {0.6: float("nan")}
+            try:
+                skills.place_in_slot(r, "yellow-block", "mid-right")
+                said = "no error"
+            except ActionError as e:
+                said = str(e)
+            check("place_in_slot: not before the cubes below are in", "rests on base-right" in said, said)
+            try:
+                skills.place_in_slot(r, "yellow-block", "base-right")
+                said = "no error"
+            except ActionError as e:
+                said = str(e)
+            check("place_in_slot: not when a cube of the pyramid is gone (nothing at its slot)",
+                  said.startswith("the pyramid is not as it was left") and all(n in said for n in ("base-left", "base-mid", "mid-left")),
+                  said)
+            r.heights = {}
+            try:
+                skills.place_in_slot(r, "yellow-block", "base-left")
+                said = "no error"
+            except ActionError as e:
+                said = str(e)
+            check("place_in_slot: a taken slot is refused", "taken" in said, said)
+        finally:
+            mp.plan_place_at, mp.held_box = real
+    run("place_in_slot", skill)
+
+
 def check_observation():
     print("observation configuration (exercise/state_estimation.py OBSERVATION_JOINTS)")
     from lab_replica.exercise import state_estimation as se
@@ -541,10 +867,10 @@ def check_observation():
 
 
 def main():
-    parts = sys.argv[1:] or ["task", "state", "observation", "motion", "barrier"]
+    parts = sys.argv[1:] or ["task", "state", "observation", "motion", "barrier", "pyramid"]
     for p in parts:
         {"task": check_task, "state": check_state, "observation": check_observation, "motion": check_motion,
-         "barrier": check_barrier}[p]()
+         "barrier": check_barrier, "pyramid": check_pyramid}[p]()
     n_fail = RESULTS.count(False)
     print(f"{len(RESULTS) - n_fail}/{len(RESULTS)} checks passed")
     return 1 if n_fail else 0

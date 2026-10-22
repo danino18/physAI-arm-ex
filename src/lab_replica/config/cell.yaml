@@ -144,3 +144,13 @@ placement:
   object_clearance: 0.020    # gap between items (room for the fingers is checked per grasp)
   max_reach: 0.74            # horizontal distance from the base axis
   min_reach: 0.20
+
+# The pyramid of cubes (the goal console's `pyramid:`, exercise/pyramid.py):
+# three cubes in a row on the board, two on them, one on top. The area round
+# it (the row's length plus 4 cm on every side) must be free of the basket,
+# the obstacle and other items: `pyramid:` says what is in the way.
+pyramid:
+  origin: [0.60, 0.0]        # the middle cube of the base row [m]
+  axis_yaw_deg: 90           # the base row's direction in the world (90: along y)
+  size: 0.05                 # the cubes' edge [m]: only cubes (blocks) of this size are used
+  gap: 0.015                 # between neighbours in the base row [m]

@@ -58,7 +58,7 @@ RESERVED = ("and", "or", "not", "imply", "forall", "exists", "item", "object", "
 
 
 def parse_item_command(text, added=()):
-    """'new-item: purple-block [prompt="small purple cube"] [shape=box|round]'
+    """'new-item: purple-block [prompt="small purple cube"] [shape=box|round] [size=0.05]'
     -> ("new-item", name, {"prompt": ..., "shape": ...}); 'forget-item:
     purple-block' -> ("forget-item", name, {}); None for any other line.
     `added`: the items added so far in this session. Raises InvalidAction
@@ -93,9 +93,17 @@ def parse_item_command(text, added=()):
     for w in words[1:]:
         key, eq, val = w.partition("=")
         key = key.lower()
-        if not eq or key not in ("prompt", "shape"):
-            raise InvalidAction(f"unknown option {w!r} (options: prompt=\"...\", shape=box|round)")
-        if key == "prompt":
+        if not eq or key not in ("prompt", "shape", "size"):
+            raise InvalidAction(f"unknown option {w!r} (options: prompt=\"...\", shape=box|round, size=<edge of a cube, m>)")
+        if key == "size":
+            try:
+                size = float(val)
+            except ValueError:
+                size = 0.0
+            if not 0.01 <= size <= 0.12:
+                raise InvalidAction("size is the edge of a wooden cube in metres, e.g. size=0.05")
+            opts["size"] = size
+        elif key == "prompt":
             if not val.strip():
                 raise InvalidAction("prompt is empty")
             opts["prompt"] = val.strip()
@@ -404,13 +412,27 @@ class Robot:
     def forget_barrier(self):
         self.ex.forget_barrier()
 
+    # ---- the pyramid (pyramid:) --------------------------------------------------------------
+
+    def check_pyramid_area(self, layout, search=False):
+        """Look and say what is in the way of the pyramid's area (or, with `search`, find the
+        nearest free place). Returns (success, message, the layout to build)."""
+        out = self._guarded(lambda: self.ex.check_pyramid_area(layout, search))
+        return (out[0], out[1], out[2] if len(out) > 2 else layout)
+
+    def start_pyramid(self, layout):
+        self.ex.start_pyramid(layout)
+
+    def forget_pyramid(self):
+        self.ex.forget_pyramid()
+
     # ---- items added for this session (new-item:) ------------------------------------------
 
     def new_item(self, name, opts):
         """Measure an item with the camera and add it for this session only:
         it is not added to the PDDL items, nor kept for the next session.
         Returns (success, message)."""
-        out = self._guarded(lambda: self.ex.new_item(name, opts["prompt"], opts.get("shape")))
+        out = self._guarded(lambda: self.ex.new_item(name, opts["prompt"], opts.get("shape"), opts.get("size")))
         if out[0]:
             self.added.append(name)
         return out[:2]
@@ -443,6 +465,47 @@ class Robot:
         self.log_file.close()
 
 
+# ---- pyramid: in the goal console -----------------------------------------------------------
+
+PYRAMID, FORGET_PYRAMID = "pyramid:", "forget-pyramid:"
+
+
+def parse_pyramid_command(text):
+    """'pyramid:' -> ("pyramid", {"origin": None, "auto": False}); 'pyramid: 0.60 0.05' ->
+    ("pyramid", {"origin": (0.60, 0.05), "auto": False}) (the middle cube of the base row);
+    'pyramid: auto' -> ("pyramid", {"origin": None, "auto": True}) (the nearest free place);
+    'forget-pyramid:' ->
+    ("forget-pyramid", {}) (the colon may be left out); None for any other line. Raises
+    InvalidAction for pyramid: with anything else."""
+    t = text.strip().lower()
+    for word in ("forget-pyramid", "pyramid"):
+        if t.startswith(word) and t[len(word):len(word) + 1] in ("", ":", " ", "\t"):
+            words = t[len(word):].lstrip(": \t").split()
+            if word == "forget-pyramid":
+                if words:
+                    raise InvalidAction(f"{FORGET_PYRAMID} takes nothing")
+                return "forget-pyramid", {}
+            if not words:
+                return "pyramid", {"origin": None, "auto": False}
+            if words == ["auto"]:
+                return "pyramid", {"origin": None, "auto": True}
+            try:
+                xy = tuple(float(w) for w in words)
+            except ValueError:
+                xy = ()
+            if len(xy) != 2:
+                raise InvalidAction(f"{PYRAMID} takes nothing, auto, or the x and y [m] of the base row's middle cube, "
+                                    f"e.g. {PYRAMID} 0.60 0.05")
+            return "pyramid", {"origin": xy, "auto": False}
+    return None
+
+
+def pyramid_hints(term):
+    term.say(term.bold("Pyramid:") + f"  {PYRAMID} builds a 3-2-1 pyramid of any cubes of the same size "
+             f"(config/cell.yaml pyramid:, {PYRAMID} <x> <y>, or {PYRAMID} auto: the nearest free place)   "
+             f"{FORGET_PYRAMID}")
+
+
 # ---- scan: / forget-barrier: in a console --------------------------------------------------
 
 SCAN, FORGET_BARRIER = "scan:", "forget-barrier:"
@@ -473,7 +536,11 @@ def barrier_command(term, robot, parsed):
     Returns whether it succeeded."""
     cmd, opts = parsed
     if cmd == "forget-barrier":
-        robot.forget_barrier()
+        try:
+            robot.forget_barrier()
+        except Exception as e:  # noqa: BLE001  (a command must not end the console)
+            term.say(term.colour("obstacle not forgotten", False) + f": {type(e).__name__}: {e}")
+            return False
         term.say(term.colour("obstacle forgotten", True) + ": the motions no longer keep clear of it")
         return True
     term.say("scanning the surroundings from several views ...")
@@ -489,7 +556,7 @@ def item_hints(term, added):
     """The lines of the hints that tell how to add an item."""
     term.say(term.bold("New item:") + f" put it on the table, then e.g.  {NEW_ITEM} purple-block  "
              "(the camera finds and measures it)")
-    term.say(" " * 10 + term.dim(f'options: prompt="..." shape=box|round   {FORGET_ITEM} <name>   '
+    term.say(" " * 10 + term.dim(f'options: prompt="..." shape=box|round size=<cube edge, m>   {FORGET_ITEM} <name>   '
                                  "added items" + (" (*)" if added else "") + " last until you quit"))
 
 

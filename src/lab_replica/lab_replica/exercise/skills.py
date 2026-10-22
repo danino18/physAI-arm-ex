@@ -6,6 +6,8 @@ The action (name ?x ...) is performed by the function of the same name with
     (pick-up red-can)        ->  pick_up(robot, "red-can")
     (put-on-table red-can)   ->  put_on_table(robot, "red-can")
     (put-in-basket red-can)  ->  put_in_basket(robot, "red-can")
+    (place-in-slot red-block top)
+                             ->  place_in_slot(robot, "red-block", "top")    (the pyramid)
 
 A skill returns a message saying what it did, or raises ActionError (from
 the toolkit: the action cannot be performed) or PlanError (no motion found).
@@ -42,9 +44,11 @@ The robot (autonomy/executive.py):
                                     `item`'s estimate comes from
     robot.grasp_mask(frame, scene, item)
                                     the pixels of `item` in `frame` to propose a grasp on
-    robot.set_obstacles(scene, exclude=())
-                                    MoveIt's planning scene: the table, the wall and what `scene`
-                                    saw (scene_obstacles), without the items in `exclude`
+    robot.set_obstacles(scene, exclude=(), skip_slots=())
+                                    MoveIt's planning scene: the table, the wall, the fixed obstacle,
+                                    the pyramid's cubes (but those in the slots `skip_slots`) and what
+                                    `scene` saw (scene_obstacles), without the items in `exclude`
+    robot.pyramid                   the pyramid being built (pyramid.Pyramid), or None
     robot.table_region(basket_xy, depth=None)
                                     where items may be put on the table (for find_table_spot)
     robot.drop_spots(scene, held, yaws)
@@ -64,6 +68,7 @@ import math
 from ..toolkit import (ActionError, Held, PlanError, Placement, rg6, show_drop, show_grasp, show_image_grasps,
                        show_table_spot, spread, wrap)
 from . import motion_planning as mp
+from . import pyramid as pyr
 from . import state_estimation as se
 
 DROP_CLEARANCE = 0.02    # dropping into the basket: the item's bottom this far above the rim or the pile
@@ -161,6 +166,44 @@ def put_in_basket(robot, item):
     robot.set_obstacles(scene, exclude=(item,))
     target, steps = _plan_drop(robot, robot.current(), held, scene)
     return _put(robot, item, target, steps)
+
+
+def place_in_slot(robot, item, slot):
+    """(place-in-slot item slot): look, check that the cubes put in the pyramid
+    before are still there, and put the held cube in `slot` of the pyramid
+    (exercise/pyramid.py), on the cubes it rests on, aligned with the row.
+    Applicable when the gripper holds a cube."""
+    pyramid = robot.pyramid
+    if pyramid is None:
+        raise ActionError("no pyramid: start it with pyramid: in the goal console")
+    if slot not in pyr.SLOTS:
+        raise ActionError(f"{slot} is not a slot of the pyramid ({', '.join(pyr.SLOTS)})")
+    if slot in pyramid.placed:
+        raise ActionError(f"not applicable: {slot} is taken by {pyramid.placed[slot][0]}")
+    missing = [s for s in pyramid.supports(slot) if s not in pyramid.placed]
+    if missing:
+        raise ActionError(f"not applicable: {slot} rests on {' and '.join(missing)}, which are empty")
+    held = _held(robot, item)
+    scene = robot.survey(se.OBSERVATION_JOINTS, held=held, exclude=(item,))
+    gone = pyr.check_cubes(pyramid, lambda X, Y: scene.depth.heights_at(X, Y, radius=0.01, items=tuple(scene.detections)))
+    if gone:
+        raise ActionError(f"the pyramid is not as it was left: nothing at {', '.join(gone)} (a cube fell?)")
+    robot.phase(f"planning where to put {item} in the pyramid")
+    robot.set_obstacles(scene, exclude=(item,), skip_slots=pyramid.supports(slot))
+    x, y, z_support = pyramid.target(slot)
+    # The fingers close across the row, so that they do not meet the neighbours: the gripper's yaw
+    # along the row (either way) first; the cube is as turned as it was grasped.
+    axis = pyramid.layout.axis_yaw
+    yaws = [wrap(psi + held.yaw_rel) for psi in (axis, axis + math.pi)]
+    yaws += [wrap(axis + k * math.pi / 2) for k in range(4)]
+    model = robot.items[item]
+    yaw, steps = mp.plan_place_at(robot.mv, robot.current(), held, mp.held_box(held, model), x, y, z_support, yaws,
+                                  robot.force)
+    robot.log(f"  {item} into {slot}: ({x:.3f}, {y:.3f}), on a support {z_support * 100:.1f} cm high")
+    target = Placement(item, held.rest, float(x), float(y), float(yaw), support="table", z_support=float(z_support))
+    msg = _put(robot, item, target, steps)
+    pyramid.put(slot, item, x, y)
+    return f"{msg} (the {slot} slot)"
 
 
 # ---- picking up --------------------------------------------------------------------------------

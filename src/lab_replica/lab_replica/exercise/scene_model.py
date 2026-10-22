@@ -134,21 +134,30 @@ def boxes_from_height_map(X, Y, H, cells, base_z, cell, pad=BARRIER_PAD, min_cel
     return [_box(p, base_z, cell, pad, f"barrier {k}") for k, p in enumerate(parts)]
 
 
-def static_obstacles(world, pad=BARRIER_PAD, tallest_only=True):
+def static_obstacles(world, pad=BARRIER_PAD, tallest_only=True, persistent=True):
     """The boxes of what a depth_world.DepthWorld measured (built with
     fill_unseen=False over the region of the barrier) that nothing explains: no
     item, not the basket, and at least MIN_HEIGHT above the table or the
-    basket floor. `tallest_only`: of those, the tallest thing only (the obstacle)."""
+    basket floor. `persistent`: and at least two views saw (world.agreeing_cells), so
+    that the arm, or a hand, seen in one view is no obstacle. `tallest_only`: of
+    those, the tallest thing only (the obstacle)."""
     from ..autonomy.depth_world import CELL
     X, Y = world.centres()
-    cells = world.occupied & ~world.labelled & ~world.unseen & ~world.blind & (world.H > world.support + MIN_HEIGHT)
+    cells = _unexplained(world, persistent)
     return boxes_from_height_map(X, Y, world.H, cells, world.table_z, CELL, pad, tallest_only=tallest_only)
 
 
-def describe_things(world):
+def _unexplained(world, persistent=True):
+    cells = world.occupied & ~world.labelled & ~world.unseen & ~world.blind & (world.H > world.support + MIN_HEIGHT)
+    if persistent and len(world.frames) >= 2:
+        cells &= world.agreeing_cells()
+    return cells
+
+
+def describe_things(world, persistent=True):
     """One line per thing the map holds that nothing explains (tallest first), for the log."""
     X, Y = world.centres()
-    cells = world.occupied & ~world.labelled & ~world.unseen & ~world.blind & (world.H > world.support + MIN_HEIGHT)
+    cells = _unexplained(world, persistent)
     return [f"at ({p[:, 0].mean():.3f}, {p[:, 1].mean():.3f}), {100 * piece_top(p) - 100 * world.table_z:.0f} cm high, "
             f"{len(p) * 0.0025 ** 2 * 1e4:.0f} cm^2" for p in sorted(pieces_of(X, Y, world.H, cells), key=piece_top,
                                                                       reverse=True)]
@@ -183,14 +192,15 @@ def load_boxes(path):
 # ---- scanning ----------------------------------------------------------------------------
 
 
-def scan_environment(robot, views=None, tallest_only=True):
+def scan_environment(robot, views=None, tallest_only=True, report=None):
     """The boxes of the obstacle: the robot looks from OBSERVATION_JOINTS and
     then from each of `views` (SCAN_VIEWS; each a list of alternatives, the first
     reachable is used; a station none of whose alternatives is reachable is
     skipped), adding every view to the same scene, and models what it measured
     (static_obstacles, from robot.map_barrier(scene)): the tallest thing that is
     no item, no basket and not the table, or with `tallest_only` False every
-    such thing.
+    such thing. `report`, a list, gets a line for each of them (where, how
+    high, how large), tallest first.
 
     The motions keep clear of what the robot knows, and the barrier is not
     known yet: scan slowly, with a hand on the emergency stop. Raises PlanError
@@ -208,6 +218,8 @@ def scan_environment(robot, views=None, tallest_only=True):
         raise PlanError(f"only {used} view could be reached: no model of the barrier")
     world = robot.map_barrier(scene)
     things = describe_things(world)
+    if report is not None:
+        report.extend(things)
     robot.log(f"  seen from {used} views, no item, basket or table: " + ("; ".join(things) if things else "nothing"))
     boxes = static_obstacles(world, tallest_only=tallest_only)
     for b in boxes:

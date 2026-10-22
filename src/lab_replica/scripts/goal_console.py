@@ -36,16 +36,19 @@ Ctrl-C during an action stops the arm; Ctrl-C or Ctrl-D at the prompt quits.
 """
 
 import argparse
+import math
 import os
 import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
 
-from lab_replica.console import (FORGET_BARRIER, FORGET_ITEM, NEW_ITEM, PREDICATES, SCAN, InvalidAction,  # noqa: E402
-                                 Robot, Terminal, banner, barrier_command, barrier_hints, common_arguments,
-                                 item_command, item_hints, parse_barrier_command, parse_item_command,
-                                 unknown_item_hint, warn_holding_added, wrap_words)
+from lab_replica.console import (FORGET_BARRIER, FORGET_ITEM, FORGET_PYRAMID, NEW_ITEM, PREDICATES, PYRAMID,  # noqa: E402
+                                 SCAN, InvalidAction, Robot, Terminal, banner, barrier_command, barrier_hints,
+                                 common_arguments, item_command, item_hints, parse_barrier_command,
+                                 parse_item_command, parse_pyramid_command, pyramid_hints, unknown_item_hint,
+                                 warn_holding_added, wrap_words)
+from lab_replica.exercise import pyramid as pyr  # noqa: E402
 from lab_replica import objects  # noqa: E402
 from lab_replica.planning import pddl  # noqa: E402
 from lab_replica.tamp import planner, task  # noqa: E402
@@ -72,6 +75,9 @@ def show_state(term, state, items):
     term.say(term.bold("State:   ") + "on the table: " + (wrap_words(table, 23) if table else "nothing"))
     term.say("         in the basket: " + (", ".join(basket) if basket else "nothing"))
     term.say("         gripper: " + (f"holding {held}" if held else "empty"))
+    slots = pyr.filled(state)
+    if slots:
+        term.say("         pyramid: " + ", ".join(f"{slots[s]} in {s}" for s in pyr.SLOTS if s in slots))
 
 
 def hints(term, state, added):
@@ -87,6 +93,7 @@ def hints(term, state, added):
     term.say(term.bold("Items:   ") + wrap_words(list(ITEMS) + [i + "*" for i in added], 9))
     item_hints(term, added)
     barrier_hints(term)
+    pyramid_hints(term)
     term.say(term.dim("Commands: state (show the state), reset (all items on the table, gripper empty), quit. "
                       "Tab completes names."))
 
@@ -114,6 +121,149 @@ def plan_for(term, state, formula, items):
     return None
 
 
+def perform_plan(term, robot, args, state, plan):
+    """Perform `plan` (a task.Plan) from `state` action by action, stopping at the
+    first that fails, as the goal console does. Returns (state, failed_at): the state the
+    performed actions should have produced, and the index of the action that failed or was
+    not performed (None when the whole plan was performed)."""
+    term.say(f"plan ({actions(len(plan))}):")
+    for k, a in enumerate(plan):
+        term.say(f"  {k + 1}. {a}")
+    n = len(plan)
+    failed = []
+
+    def before(k, action):
+        if args.step:
+            robot.window_status(f"waiting for Enter: action {k + 1}/{n} {action}")
+            with robot.idle():
+                answer = term.ask(f"Enter performs action {k + 1}/{n} {action} (n + Enter stops) ")
+            if answer is None or answer.strip().lower().startswith("n"):
+                term.say("stopped before the action")
+                robot.window_status(f"stopped before action {k + 1}/{n} {action}")
+                return False
+        term.say(f"performing action {k + 1}/{n}: {action}")
+        return True
+
+    def after(k, action, ok, msg):
+        if ok:
+            term.say(term.colour("action success", True) + f": {msg}")
+        else:
+            failed.append(k)
+            term.say(term.colour("action failed", False) + f": {msg}")
+            robot.window_status(f"goal not reached: action {k + 1}/{n} {action} failed")
+
+    # The exercise's plan execution (exercise/task_planning/planning.py).
+    state, failed_at = tp.execute_plan(state, list(plan), plan.states, robot.execute, before, after)
+    if failed_at is None:
+        robot.window_status(f"goal reached ({actions(n)})")
+        term.say(term.colour("goal reached", True)
+                 + f" ({actions(n)}; the state is what they should have produced)")
+    elif failed:
+        term.say(term.colour("goal not reached", False)
+                 + f": stopped at action {failed_at + 1} of {n}; the state below is the one "
+                   "before that action")
+        grip, held = robot.grip(), pddl.held(state)
+        if grip is not None and grip != (held is not None):
+            term.say(term.colour("warning", False) + ": the gripper is "
+                     + ("holding something" if grip else "empty") + ", unlike the state below: "
+                     "check the scene, then use `reset` or the action console")
+    return state, failed_at
+
+
+def pyramid_layout(robot, origin=None):
+    """The pyramid's Layout: config/cell.yaml's pyramid: block, with the base row's middle
+    cube at `origin` (x, y) when given."""
+    cell = robot.ex.cell
+    cfg = cell.get("pyramid") or {}
+    origin = origin or cfg.get("origin")
+    if origin is None:
+        raise ValueError("no place for the pyramid: give pyramid: <x> <y>, or origin: in config/cell.yaml")
+    return pyr.Layout(tuple(float(v) for v in origin), math.radians(float(cfg.get("axis_yaw_deg", 90.0))),
+                      float(cfg.get("size", 0.05)), float(cfg.get("gap", 0.015)), float(cell["table"]["surface_z"]))
+
+
+def build_pyramid(term, robot, args, state, items, origin=None, auto=False):
+    """`pyramid:` plan and build the pyramid (exercise/pyramid.py): the cubes of its size
+    among `items` go into its slots, the planner choosing which and in which order. A
+    pyramid that was left half built is continued. A cube the arm cannot reach, or whose
+    pick-up fails, is left out and the rest planned again. Returns the new state."""
+    try:
+        layout = pyramid_layout(robot, origin)
+    except ValueError as e:
+        term.say(term.colour("no pyramid", False) + f": {e}")
+        return state
+    cubes = pyr.cubes_of({k: robot.ex.items[k] for k in items if k in robot.ex.items}, layout.size)
+    free = [s for s in pyr.SLOTS if s not in pyr.filled(state)]
+    if not free:
+        term.say("the pyramid is built: nothing to do")
+        return state
+
+    def available(usable):
+        held = pddl.held(state)
+        return [c for c in usable if ("on-table", c) in state or c == held]
+    have = available(cubes)
+    term.say(f"pyramid: {len(free)} slots to fill with cubes of {layout.size * 1000:.0f} mm; "
+             f"{len(have)} on the table or in the gripper ({', '.join(have) or 'none'})")
+    if len(have) < len(free):
+        term.say(term.colour("not enough cubes", False) + f": {len(free) - len(have)} more cube(s) of "
+                 f"{layout.size * 1000:.0f} mm needed (new-item: <name> size={layout.size})")
+        return state
+    current = robot.ex.pyramid
+    if current is not None and current.placed:
+        layout = current.layout             # the one being built is continued where it stands
+    else:
+        if pyr.filled(state):
+            term.say(term.colour("no pyramid", False) + ": cubes are in the slots of another pyramid "
+                     f"({FORGET_PYRAMID} or reset first)")
+            return state
+        term.say(f"checking that the area of the pyramid at ({layout.origin[0]:.2f}, {layout.origin[1]:.2f}) "
+                 "is free" + (" (or finding a free place) ..." if auto else " ..."))
+        ok, msg, layout = robot.check_pyramid_area(layout, search=auto)
+        if not ok:
+            robot.window_status("the pyramid's area is not free")
+            term.say(term.colour("the pyramid's area is not free", False) + f": {msg}")
+            term.say(term.dim(f"move what is in the way, choose another place ({PYRAMID} <x> <y>), "
+                              f"or let the robot find one ({PYRAMID} auto)"))
+            return state
+        term.say(term.colour("the pyramid's area is free", True) + f": {msg}")
+        robot.start_pyramid(layout)
+    excluded = set(robot.ex.out_of_reach(cubes))
+    if excluded:
+        term.say(term.colour("out of the arm's reach", False) + f": {', '.join(sorted(excluded))} "
+                 "(left out; put them nearer the robot to use them)")
+    for attempt in range(3):
+        usable = [c for c in cubes if c not in excluded]
+        if len(available(usable)) < len(free):
+            term.say(term.colour("not enough cubes", False) + f": {len(free) - len(available(usable))} more cube(s) "
+                     f"of {layout.size * 1000:.0f} mm within reach needed")
+            return state
+        init = (frozenset(state) | pyr.facts(usable)) - {("slot-free", s) for s in pyr.filled(state)}
+        robot.window_status("planning the pyramid")
+        term.say("planning ...")
+        try:
+            plan = task.solve(init, pyr.goal(), log=lambda s: None, items=items, slots=pyr.SLOTS)
+        except planner.Unsolvable:
+            term.say(term.colour("the pyramid cannot be reached from this state", False))
+            return state
+        except planner.PlannerError as e:
+            term.say(term.colour("planner error", False) + f": {e}")
+            return state
+        state, failed_at = perform_plan(term, robot, args, frozenset(init), plan)
+        # The pyramid's facts stay in the state (which slots are taken); the cubes' and the static
+        # ones are added again by the next pyramid:.
+        state = frozenset(f for f in state if f[0] in ("in-slot", "on-table", "in-basket", "robot-gripping",
+                                                       "robot-gripper-empty"))
+        if failed_at is None:
+            return state
+        words = plan[failed_at].strip("()").split()
+        if words[0] != "pick-up" or robot.grip():
+            return state                    # a cube was lost, or was not let go: the user decides
+        excluded.add(words[1])
+        term.say(f"{words[1]} could not be picked up: left out, planning the rest again")
+        free = [s for s in pyr.SLOTS if s not in pyr.filled(state)]
+    return state
+
+
 def main():
     sys.stdout.reconfigure(line_buffering=True)
     ap = common_arguments(argparse.ArgumentParser(description=__doc__,
@@ -127,7 +277,7 @@ def main():
         ITEMS[:] = task.default_items()       # the objects of the exercise's problem.pddl
     except planner.PlannerError as e:
         return f"{e}"
-    words = list(PREDICATES) + list(CONNECTIVES) + list(ITEMS) + ["state", "reset", "quit", NEW_ITEM, FORGET_ITEM, SCAN, FORGET_BARRIER]
+    words = list(PREDICATES) + list(CONNECTIVES) + list(ITEMS) + ["state", "reset", "quit", NEW_ITEM, FORGET_ITEM, SCAN, FORGET_BARRIER, PYRAMID, FORGET_PYRAMID]
     term = Terminal(words, "goals")
     banner(term, "goal console", args.sim)
     unknown = [i for i in ITEMS if i not in objects.load_items()]
@@ -163,6 +313,7 @@ def main():
             if cmd == "state":
                 continue            # the hints show it
             if cmd == "reset":
+                robot.forget_pyramid()
                 state = task.most_permissive_init(all_items(robot))
                 term.say("state reset: every item on the table, the gripper empty")
                 if robot.grip():
@@ -171,6 +322,21 @@ def main():
             barrier_cmd = parse_barrier_command(line)
             if barrier_cmd is not None:
                 barrier_command(term, robot, barrier_cmd)
+                continue
+            try:
+                pyramid_cmd = parse_pyramid_command(line)
+            except InvalidAction as e:
+                term.say(term.colour("invalid pyramid command", False) + f": {e}")
+                continue
+            if pyramid_cmd is not None:
+                if pyramid_cmd[0] == "forget-pyramid":
+                    robot.forget_pyramid()
+                    state = frozenset(f for f in state if f[0] != "in-slot")
+                    term.say(term.colour("pyramid forgotten", True)
+                             + ": its cubes are no longer in the state or an obstacle for the motions")
+                else:
+                    state = build_pyramid(term, robot, args, state, all_items(robot), pyramid_cmd[1]["origin"],
+                                          pyramid_cmd[1]["auto"])
                 continue
             try:
                 item_cmd = parse_item_command(line, robot.added)
@@ -204,47 +370,7 @@ def main():
             if not plan:
                 robot.window_status("no plan (see the console)")
                 continue
-            term.say(f"plan ({actions(len(plan))}):")
-            for k, a in enumerate(plan):
-                term.say(f"  {k + 1}. {a}")
-            n = len(plan)
-            failed = []
-
-            def before(k, action):
-                if args.step:
-                    robot.window_status(f"waiting for Enter: action {k + 1}/{n} {action}")
-                    with robot.idle():
-                        answer = term.ask(f"Enter performs action {k + 1}/{n} {action} (n + Enter stops) ")
-                    if answer is None or answer.strip().lower().startswith("n"):
-                        term.say("stopped before the action")
-                        robot.window_status(f"stopped before action {k + 1}/{n} {action}")
-                        return False
-                term.say(f"performing action {k + 1}/{n}: {action}")
-                return True
-
-            def after(k, action, ok, msg):
-                if ok:
-                    term.say(term.colour("action success", True) + f": {msg}")
-                else:
-                    failed.append(k)
-                    term.say(term.colour("action failed", False) + f": {msg}")
-                    robot.window_status(f"goal not reached: action {k + 1}/{n} {action} failed")
-
-            # The exercise's plan execution (exercise/task_planning/planning.py).
-            state, failed_at = tp.execute_plan(state, list(plan), plan.states, robot.execute, before, after)
-            if failed_at is None:
-                robot.window_status(f"goal reached ({actions(n)})")
-                term.say(term.colour("goal reached", True)
-                         + f" ({actions(n)}; the state is what they should have produced)")
-            elif failed:
-                term.say(term.colour("goal not reached", False)
-                         + f": stopped at action {failed_at + 1} of {n}; the state below is the one "
-                           "before that action")
-                grip, held = robot.grip(), pddl.held(state)
-                if grip is not None and grip != (held is not None):
-                    term.say(term.colour("warning", False) + ": the gripper is "
-                             + ("holding something" if grip else "empty") + ", unlike the state below: "
-                             "check the scene, then use `reset` or the action console")
+            state, _ = perform_plan(term, robot, args, state, plan)
     except KeyboardInterrupt:
         term.say()
     finally:
