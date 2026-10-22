@@ -408,6 +408,44 @@ def check_barrier():
                                        tallest_only=True) == [])
     run("tallest_only", tallest)
 
+    def arm_over_the_base():
+        # The camera sees the arm over the base (here: a 45 cm column 25 cm from the base axis) as well as
+        # the wooden cube (15 cm high) on the board. The map of a tall obstacle (ceiling 60 cm) must not
+        # take the arm for the obstacle: the cube is the tallest thing.
+        from lab_replica.autonomy.depth_world import DepthWorld
+        from lab_replica.exercise.state_estimation import pixels_to_world
+
+        class Seen(Frame):
+            q = None
+
+            def points_world(self, mask=None, stride=1):
+                H, W = self.depth.shape
+                vv, uu = np.mgrid[0:H:stride, 0:W:stride]
+                d = self.depth[::stride, ::stride]
+                ok = np.isfinite(d) & (d > 0)
+                return pixels_to_world(uu[ok], vv[ok], d[ok], self.K, self.T_world_cam)
+
+            def project(self, P):
+                T = np.linalg.inv(self.T_world_cam)
+                C = np.atleast_2d(P) @ T[:3, :3].T + T[:3, 3]
+                return np.stack([self.K[0, 0] * C[:, 0] / C[:, 2] + self.K[0, 2],
+                                 self.K[1, 1] * C[:, 1] / C[:, 2] + self.K[1, 2]], axis=1), C[:, 2]
+        box = lambda x, y, r: [(x - r, y - r), (x + r, y - r), (x + r, y + r), (x - r, y + r)]  # noqa: E731
+        prisms = [(box(0.25, 0.0, 0.04), 0.45), (box(0.55, 0.10, 0.05), 0.15)]
+        frames = [Seen(x, y, 0.85, prisms) for x, y in ((0.2, 0.0), (0.7, 0.0), (0.45, -0.2), (0.45, 0.2))]
+        cell = config.load_cell()
+        pl = cell["placement"]
+        args = (frames, cell, objects.load_items(), objects.load_basket(cell), None, {})
+        kw = dict(max_item_height=0.6, robot_radius=0.17, region=([-0.1, 0.9], [-0.38, 0.36]), fill_unseen=False)
+        fixed = sm.static_obstacles(DepthWorld(*args, base_height=0.24, **kw))
+        broken = sm.static_obstacles(DepthWorld(*args, **kw))
+        on_cube = lambda bs: bs and all(abs(b.c[0] - 0.55) < 0.08 and abs(b.c[1] - 0.10) < 0.08 for b in bs)  # noqa: E731
+        check("the obstacle is the wooden cube, not the arm over the base (base_height)",
+              bool(on_cube(fixed)) and abs(sm.barrier_top(fixed) - 0.17) < 0.011,
+              f"{len(fixed)} boxes, top {sm.barrier_top(fixed)}; without base_height: "
+              f"{[np.round(b.c[:2], 2).tolist() for b in broken]}")
+    run("arm over the base", arm_over_the_base)
+
     def commands():
         from lab_replica.console import parse_barrier_command as parse
         got = [parse(t) for t in ("scan:", "scan", "scan: all", "forget-barrier:", "scan: x", "scanner",

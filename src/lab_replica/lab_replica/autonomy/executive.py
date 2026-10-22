@@ -593,7 +593,7 @@ class ActionExecutive:
         return DepthWorld(scene.depth_frames, self.cell, self.items, self.basket, scene.basket_xy, scene.detections,
                           max_item_height=b.get("max_height", self.cfg["max_item_height"]),
                           robot_radius=self.cfg["robot_radius"], mask_erode_px=int(self.cfg["sam3"]["mask_erode_px"]),
-                          region=region, fill_unseen=False)
+                          region=region, fill_unseen=False, base_height=self.cfg["max_item_height"] - 0.06)
 
     def scan_barrier(self, tallest_only=True):
         """`scan:` scan the surroundings from several views and keep the

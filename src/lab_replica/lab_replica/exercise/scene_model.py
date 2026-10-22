@@ -38,6 +38,7 @@ MIN_CELLS = 40              # a piece of fewer map cells (2.5 cm^2) is noise
 MIN_HEIGHT = 0.03           # a cell is a barrier when it is this much above its support
 MAX_BOXES = 16              # a box is one more thing every motion is checked against
 MAX_SPLITS = 6              # a piece is cut in two at most this many times
+TALL_WARNING = 0.45         # scan_environment warns about an obstacle taller than this [m]
 OBSTACLE_MIN_CELLS = 256    # the tallest piece is chosen among those of this many cells (16 cm^2): not a depth stray
 # What a box may be: the heights of its cells within `height`, its cells at least
 # `fill` of its area. When there would be more than MAX_BOXES, the next row is used.
@@ -209,6 +210,10 @@ def scan_environment(robot, views=None, tallest_only=True):
     things = describe_things(world)
     robot.log(f"  seen from {used} views, no item, basket or table: " + ("; ".join(things) if things else "nothing"))
     boxes = static_obstacles(world, tallest_only=tallest_only)
+    for b in boxes:
+        if b.c[2] + b.h[2] > TALL_WARNING:
+            robot.log(f"  warning: {b.name} is {100 * (b.c[2] + b.h[2]):.0f} cm high: the robot's own arm, "
+                      f"seen by the camera, rather than an obstacle? (see the list above)")
     robot.log(f"  {'obstacle' if tallest_only else 'barrier'}: {len(boxes)} boxes"
               + "".join(f"\n    {b.name}: centre {np.round(b.c, 3)}, half sizes {np.round(b.h, 3)}" for b in boxes))
     return boxes
