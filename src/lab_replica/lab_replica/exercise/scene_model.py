@@ -8,8 +8,9 @@ fixed views, turned into a few boxes, and kept in MoveIt's planning scene
 for as long as the console runs (or, saved to a file, for the next run):
 
     scan_environment(robot)      the robot looks from OBSERVATION_JOINTS and the SCAN_VIEWS, and
-                                 returns the boxes of what it measured that is no item, no
-                                 basket and not the table or the wall
+                                 returns the boxes of the tallest thing it measured that is no item,
+                                 no basket and not the table or the wall (or of everything it
+                                 measured that is none of them)
     static_obstacles(world)      the same boxes from a depth_world.DepthWorld
     boxes_from_height_map(...)   the boxes of the cells of a height map (what static_obstacles does)
     barrier_top(boxes)           the height of the tallest box: motions rise above it
@@ -37,6 +38,7 @@ MIN_CELLS = 40              # a piece of fewer map cells (2.5 cm^2) is noise
 MIN_HEIGHT = 0.03           # a cell is a barrier when it is this much above its support
 MAX_BOXES = 16              # a box is one more thing every motion is checked against
 MAX_SPLITS = 6              # a piece is cut in two at most this many times
+OBSTACLE_MIN_CELLS = 256    # the tallest piece is chosen among those of this many cells (16 cm^2): not a depth stray
 # What a box may be: the heights of its cells within `height`, its cells at least
 # `fill` of its area. When there would be more than MAX_BOXES, the next row is used.
 BOX_TOLERANCES = ((0.03, 0.75), (0.06, 0.60), (0.12, 0.45), (math.inf, 0.0))
@@ -90,16 +92,39 @@ def _box(pts, base_z, cell, pad, name):
     return Box(name, [centre[0], centre[1], base_z + h], R, [half[0] + pad, half[1] + pad, h])
 
 
-def boxes_from_height_map(X, Y, H, cells, base_z, cell, pad=BARRIER_PAD, min_cells=MIN_CELLS, max_boxes=MAX_BOXES):
-    """The boxes of the connected pieces of `cells` (a boolean map; 8-connected)
-    in a height map: X, Y the cells' centres, H their tops, each box standing
-    on base_z up to the highest cell it holds, plus `pad` on every side."""
+def pieces_of(X, Y, H, cells, min_cells=MIN_CELLS):
+    """The connected pieces (8-connected) of `cells` (a boolean map) of a
+    height map, each as its cells' (x, y, top) (N, 3)."""
     n, label = cv2.connectedComponents(np.asarray(cells, np.uint8), connectivity=8)
     pieces = []
     for i in range(1, n):
         m = label == i
         if m.sum() >= min_cells:
             pieces.append(np.c_[X[m], Y[m], H[m]])
+    return pieces
+
+
+def piece_top(piece):
+    """The height of a piece: its cells' 90th percentile (a stray high cell does not count)."""
+    return float(np.percentile(piece[:, 2], 90))
+
+
+def tallest_piece(pieces, min_cells=OBSTACLE_MIN_CELLS):
+    """The tallest of `pieces` among those of at least `min_cells` cells, or None."""
+    big = [p for p in pieces if len(p) >= min_cells]
+    return max(big, key=piece_top) if big else None
+
+
+def boxes_from_height_map(X, Y, H, cells, base_z, cell, pad=BARRIER_PAD, min_cells=MIN_CELLS, max_boxes=MAX_BOXES,
+                          tallest_only=False):
+    """The boxes of the connected pieces of `cells` (a boolean map; 8-connected)
+    in a height map: X, Y the cells' centres, H their tops, each box standing
+    on base_z up to the highest cell it holds, plus `pad` on every side.
+    `tallest_only`: only the boxes of the tallest piece (tallest_piece)."""
+    pieces = pieces_of(X, Y, H, cells, min_cells)
+    if tallest_only:
+        tall = tallest_piece(pieces)
+        pieces = [] if tall is None else [tall]
     parts = []
     for height, fill in BOX_TOLERANCES:
         parts = [p for pts in pieces for p in _split(pts, height, fill, cell)]
@@ -108,15 +133,24 @@ def boxes_from_height_map(X, Y, H, cells, base_z, cell, pad=BARRIER_PAD, min_cel
     return [_box(p, base_z, cell, pad, f"barrier {k}") for k, p in enumerate(parts)]
 
 
-def static_obstacles(world, pad=BARRIER_PAD):
+def static_obstacles(world, pad=BARRIER_PAD, tallest_only=True):
     """The boxes of what a depth_world.DepthWorld measured (built with
     fill_unseen=False over the region of the barrier) that nothing explains: no
     item, not the basket, and at least MIN_HEIGHT above the table or the
-    basket floor."""
+    basket floor. `tallest_only`: of those, the tallest thing only (the obstacle)."""
     from ..autonomy.depth_world import CELL
     X, Y = world.centres()
     cells = world.occupied & ~world.labelled & ~world.unseen & ~world.blind & (world.H > world.support + MIN_HEIGHT)
-    return boxes_from_height_map(X, Y, world.H, cells, world.table_z, CELL, pad)
+    return boxes_from_height_map(X, Y, world.H, cells, world.table_z, CELL, pad, tallest_only=tallest_only)
+
+
+def describe_things(world):
+    """One line per thing the map holds that nothing explains (tallest first), for the log."""
+    X, Y = world.centres()
+    cells = world.occupied & ~world.labelled & ~world.unseen & ~world.blind & (world.H > world.support + MIN_HEIGHT)
+    return [f"at ({p[:, 0].mean():.3f}, {p[:, 1].mean():.3f}), {100 * piece_top(p) - 100 * world.table_z:.0f} cm high, "
+            f"{len(p) * 0.0025 ** 2 * 1e4:.0f} cm^2" for p in sorted(pieces_of(X, Y, world.H, cells), key=piece_top,
+                                                                      reverse=True)]
 
 
 # ---- using them -------------------------------------------------------------------------
@@ -148,12 +182,14 @@ def load_boxes(path):
 # ---- scanning ----------------------------------------------------------------------------
 
 
-def scan_environment(robot, views=None):
-    """The boxes of the barrier: the robot looks from OBSERVATION_JOINTS and
+def scan_environment(robot, views=None, tallest_only=True):
+    """The boxes of the obstacle: the robot looks from OBSERVATION_JOINTS and
     then from each of `views` (SCAN_VIEWS; each a list of alternatives, the first
     reachable is used; a station none of whose alternatives is reachable is
     skipped), adding every view to the same scene, and models what it measured
-    (static_obstacles, from robot.map_barrier(scene)).
+    (static_obstacles, from robot.map_barrier(scene)): the tallest thing that is
+    no item, no basket and not the table, or with `tallest_only` False every
+    such thing.
 
     The motions keep clear of what the robot knows, and the barrier is not
     known yet: scan slowly, with a hand on the emergency stop. Raises PlanError
@@ -169,7 +205,10 @@ def scan_environment(robot, views=None):
             robot.log(f"  scan view {k + 1} skipped: {e}")
     if used < SCAN_MIN_VIEWS:
         raise PlanError(f"only {used} view could be reached: no model of the barrier")
-    boxes = static_obstacles(robot.map_barrier(scene))
-    robot.log(f"  barrier: {len(boxes)} boxes from {used} views"
+    world = robot.map_barrier(scene)
+    things = describe_things(world)
+    robot.log(f"  seen from {used} views, no item, basket or table: " + ("; ".join(things) if things else "nothing"))
+    boxes = static_obstacles(world, tallest_only=tallest_only)
+    robot.log(f"  {'obstacle' if tallest_only else 'barrier'}: {len(boxes)} boxes"
               + "".join(f"\n    {b.name}: centre {np.round(b.c, 3)}, half sizes {np.round(b.h, 3)}" for b in boxes))
     return boxes

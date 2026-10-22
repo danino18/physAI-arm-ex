@@ -396,10 +396,10 @@ class Robot:
 
     # ---- the fixed barrier (scan:) -----------------------------------------------------------
 
-    def scan_barrier(self):
-        """Scan the surroundings from several views and keep the fixed barrier
-        they show. Returns (success, message)."""
-        return self._guarded(self.ex.scan_barrier)[:2]
+    def scan_barrier(self, tallest_only=True):
+        """Scan the surroundings from several views and keep the obstacle they
+        show (the tallest thing that is no item). Returns (success, message)."""
+        return self._guarded(lambda: self.ex.scan_barrier(tallest_only))[:2]
 
     def forget_barrier(self):
         self.ex.forget_barrier()
@@ -449,28 +449,37 @@ SCAN, FORGET_BARRIER = "scan:", "forget-barrier:"
 
 
 def parse_barrier_command(text):
-    """'scan:' -> "scan", 'forget-barrier:' -> "forget-barrier" (the colon may
-    be left out); None for any other line."""
-    t = text.strip().lower().rstrip(":").strip()
-    return t if t in ("scan", "forget-barrier") else None
+    """'scan:' -> ("scan", {"tallest": True}), 'scan: all' -> ("scan", {"tallest": False}),
+    'forget-barrier:' -> ("forget-barrier", {}) (the colon may be left out);
+    None for any other line."""
+    t = text.strip().lower()
+    for word in ("forget-barrier", "scan"):
+        if t.startswith(word):
+            rest = t[len(word):].lstrip(": \t")
+            if word == "forget-barrier":
+                return ("forget-barrier", {}) if not rest else None
+            return ("scan", {"tallest": False}) if rest == "all" else ("scan", {"tallest": True}) if not rest else None
+    return None
 
 
 def barrier_hints(term):
-    term.say(term.bold("Barrier:") + f"  {SCAN} looks at the surroundings from several views and keeps clear of "
-             f"what it finds that is no item (slow: a hand on the emergency stop)   {FORGET_BARRIER}")
+    term.say(term.bold("Obstacle:") + f" {SCAN} looks at the surroundings from several views and keeps clear of the "
+             f"tallest thing that is no item ({SCAN} all: of everything that is none; slow: a hand on the emergency "
+             f"stop)   {FORGET_BARRIER}")
 
 
-def barrier_command(term, robot, cmd):
-    """Run a scan: / forget-barrier: command (parse_barrier_command). Returns
-    whether it succeeded."""
+def barrier_command(term, robot, parsed):
+    """Run a scan: / forget-barrier: command (parse_barrier_command's result).
+    Returns whether it succeeded."""
+    cmd, opts = parsed
     if cmd == "forget-barrier":
         robot.forget_barrier()
-        term.say(term.colour("barrier forgotten", True) + ": the motions no longer keep clear of it")
+        term.say(term.colour("obstacle forgotten", True) + ": the motions no longer keep clear of it")
         return True
     term.say("scanning the surroundings from several views ...")
-    ok, msg = robot.scan_barrier()
-    term.say(term.colour("barrier scanned", True) + f": {msg}" if ok else
-             term.colour("barrier not scanned", False) + f": {msg}")
+    ok, msg = robot.scan_barrier(opts["tallest"])
+    term.say(term.colour("obstacle scanned", True) + f": {msg}" if ok else
+             term.colour("obstacle not scanned", False) + f": {msg}")
     return ok
 
 

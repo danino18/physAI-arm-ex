@@ -595,15 +595,16 @@ class ActionExecutive:
                           robot_radius=self.cfg["robot_radius"], mask_erode_px=int(self.cfg["sam3"]["mask_erode_px"]),
                           region=region, fill_unseen=False)
 
-    def scan_barrier(self):
+    def scan_barrier(self, tallest_only=True):
         """`scan:` scan the surroundings from several views and keep the
-        fixed barrier they show (exercise/scene_model.py scan_environment).
+        obstacle they show: the tallest thing that is no item (`scan: all`:
+        everything that is none; exercise/scene_model.py scan_environment).
         Returns (success, message)."""
-        self.log("== scan: the fixed barrier")
+        self.log("== scan: the obstacle")
         self.action = "scan"
 
         def act():
-            boxes = sm.scan_environment(self)
+            boxes = sm.scan_environment(self, tallest_only=tallest_only)
             self.set_barrier(boxes)
             if self.run_dir:
                 path = os.path.join(self.run_dir, "barrier.json")

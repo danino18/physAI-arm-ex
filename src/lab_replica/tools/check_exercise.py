@@ -391,6 +391,32 @@ def check_barrier():
                                               for a, b in zip(boxes, back)))
     run("barrier helpers", helpers)
 
+    def tallest():
+        cube = wall(0.40, 0.00, 0.10, 0.10, 0.3)             # the wooden cube: 10 x 10 cm, 12 cm high
+        low = wall(0.60, -0.15, 0.50, 0.06, 0.0)             # something longer, 5 cm high
+        spike = wall(0.20, 0.20, 0.02, 0.02, 0.0)            # a tall stray: 2 x 2 cm, 50 cm high
+        H = np.where(cube, 0.12, np.where(low, 0.05, np.where(spike, 0.5, -1e3)))
+        cells = cube | low | spike
+        every = sm.boxes_from_height_map(X, Y, H, cells, 0.0, cell_size, min_cells=10)
+        only = sm.boxes_from_height_map(X, Y, H, cells, 0.0, cell_size, min_cells=10, tallest_only=True)
+        near_cube = all(abs(b.c[0] - 0.40) < 0.08 and abs(b.c[1]) < 0.08 for b in only)
+        check("tallest_only: of a cube, something longer but lower and a tall stray, the cube only",
+              len(every) >= 3 and len(only) >= 1 and near_cube and abs(sm.barrier_top(only) - 0.14) < 0.011,
+              f"{len(every)} boxes without, {len(only)} with; top {sm.barrier_top(only)}")
+        check("tallest_only: nothing big enough is no obstacle",
+              sm.boxes_from_height_map(X, Y, np.where(spike, 0.5, -1e3), spike, 0.0, cell_size, min_cells=10,
+                                       tallest_only=True) == [])
+    run("tallest_only", tallest)
+
+    def commands():
+        from lab_replica.console import parse_barrier_command as parse
+        got = [parse(t) for t in ("scan:", "scan", "scan: all", "forget-barrier:", "scan: x", "scanner",
+                                  "(pick-up red-can)")]
+        want = [("scan", {"tallest": True}), ("scan", {"tallest": True}), ("scan", {"tallest": False}),
+                ("forget-barrier", {}), None, None, None]
+        check("parse_barrier_command: scan:, scan: all, forget-barrier:, nothing else", got == want, str(got))
+    run("parse_barrier_command", commands)
+
     def strategies():
         # A stand-in for MoveIt, and for the kinematics: the "height" of a configuration is its joint 1.
         # The barrier blocks joint 0 in (0.3, 0.5) below a height of 0.5.
