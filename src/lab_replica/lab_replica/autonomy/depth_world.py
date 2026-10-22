@@ -116,6 +116,7 @@ class DepthWorld:
         self.keepout = np.hypot(X, Y) < max(robot_radius, pl["robot_keepout_radius"])
         self.support, self.wall = self._supports(X, Y)
         self.frames = [f for f in frames if f is not None]
+        self._robot_radius, self._held_box = robot_radius, held_box
         self.mask_erode_px = mask_erode_px
 
         top = self._seen_tops(self.frames, robot_radius, held_box)
@@ -246,6 +247,17 @@ class DepthWorld:
         stray = high & single & (n_high < 0.5)
         top[stray] = self.support[stray]
         return np.where(np.isfinite(top), top, np.nan)
+
+    def agreeing_cells(self, min_frames=2, tolerance=0.02):
+        """The cells where at least `min_frames` frames each saw a top no more than
+        `tolerance` lower than the map's: something that stays where it is. What one
+        view alone saw there (the arm, a hand that came into one view) is left out."""
+        count = np.zeros(self.H.shape, int)
+        for f in self.frames:
+            t = self._seen_tops([f], self._robot_radius, self._held_box)
+            with np.errstate(invalid="ignore"):
+                count += np.isfinite(t) & (t >= self.H - tolerance)
+        return count >= min_frames
 
     def _fill_unseen(self, H, X, Y):
         """Heights for the unseen cells: small holes take their seen

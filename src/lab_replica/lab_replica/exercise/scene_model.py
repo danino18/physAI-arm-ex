@@ -134,21 +134,30 @@ def boxes_from_height_map(X, Y, H, cells, base_z, cell, pad=BARRIER_PAD, min_cel
     return [_box(p, base_z, cell, pad, f"barrier {k}") for k, p in enumerate(parts)]
 
 
-def static_obstacles(world, pad=BARRIER_PAD, tallest_only=True):
+def static_obstacles(world, pad=BARRIER_PAD, tallest_only=True, persistent=True):
     """The boxes of what a depth_world.DepthWorld measured (built with
     fill_unseen=False over the region of the barrier) that nothing explains: no
     item, not the basket, and at least MIN_HEIGHT above the table or the
-    basket floor. `tallest_only`: of those, the tallest thing only (the obstacle)."""
+    basket floor. `persistent`: and at least two views saw (world.agreeing_cells), so
+    that the arm, or a hand, seen in one view is no obstacle. `tallest_only`: of
+    those, the tallest thing only (the obstacle)."""
     from ..autonomy.depth_world import CELL
     X, Y = world.centres()
-    cells = world.occupied & ~world.labelled & ~world.unseen & ~world.blind & (world.H > world.support + MIN_HEIGHT)
+    cells = _unexplained(world, persistent)
     return boxes_from_height_map(X, Y, world.H, cells, world.table_z, CELL, pad, tallest_only=tallest_only)
 
 
-def describe_things(world):
+def _unexplained(world, persistent=True):
+    cells = world.occupied & ~world.labelled & ~world.unseen & ~world.blind & (world.H > world.support + MIN_HEIGHT)
+    if persistent and len(world.frames) >= 2:
+        cells &= world.agreeing_cells()
+    return cells
+
+
+def describe_things(world, persistent=True):
     """One line per thing the map holds that nothing explains (tallest first), for the log."""
     X, Y = world.centres()
-    cells = world.occupied & ~world.labelled & ~world.unseen & ~world.blind & (world.H > world.support + MIN_HEIGHT)
+    cells = _unexplained(world, persistent)
     return [f"at ({p[:, 0].mean():.3f}, {p[:, 1].mean():.3f}), {100 * piece_top(p) - 100 * world.table_z:.0f} cm high, "
             f"{len(p) * 0.0025 ** 2 * 1e4:.0f} cm^2" for p in sorted(pieces_of(X, Y, world.H, cells), key=piece_top,
                                                                       reverse=True)]

@@ -52,6 +52,8 @@ from .depth_world import DepthWorld
 from .drop import drop_spots
 from .views import hand_eye
 
+PYRAMID_MIN_REACH = 0.30    # pyramid: auto looks for a place whose cubes are at least this far from the base axis [m]
+
 
 @dataclass
 class HeldItem:
@@ -671,7 +673,8 @@ class ActionExecutive:
             if not problems:
                 return "the pyramid's area is free"
             if search:
-                reach = (float(region["min_reach"]), float(region["max_reach"]))
+                # Comfortable for stacking: not close to the base, and a hand's breadth short of the far reach.
+                reach = (max(float(region["min_reach"]), PYRAMID_MIN_REACH), float(region["max_reach"]) - 0.05)
                 moved = pyr.search(layout, region, reach, self.barrier, basket, others)
                 if moved is not None:
                     found["layout"] = moved
@@ -682,6 +685,20 @@ class ActionExecutive:
 
         ok, msg = self._perform(act, "pyramid area")
         return ok, msg, found["layout"]
+
+    def out_of_reach(self, names):
+        """Of the items `names`, those the last look saw where the arm cannot pick them up: farther
+        from its base axis than the placement reach of cell.yaml, or nearer than its minimum."""
+        pl = self.cell["placement"]
+        out = []
+        for name in names:
+            d = self.scene.detections.get(name) if self.scene is not None else None
+            if d is None:
+                continue
+            p = d.estimate.placement
+            if not float(pl["min_reach"]) <= math.hypot(p.x, p.y) <= float(pl["max_reach"]):
+                out.append(name)
+        return out
 
     def forget_pyramid(self):
         """`forget-pyramid:` the cubes put in the pyramid are no obstacle in the planning scene any more."""

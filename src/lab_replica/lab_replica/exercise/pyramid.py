@@ -37,7 +37,7 @@ SLOTS = BASE + tuple(RESTS_ON)
 LEVEL = {**{s: 0 for s in BASE}, "mid-left": 1, "mid-right": 1, "top": 2}
 
 PAD = 0.005                 # the boxes of the cubes are this much larger on every side (motion_planning.ITEM_PAD)
-ZONE_MARGIN = 0.06          # the pyramid's area: its cubes' outline grown by this (room for the fingers)
+ZONE_MARGIN = 0.04          # the pyramid's area: its cubes' outline grown by this (room for the fingers)
 SIZE_TOLERANCE = 0.001      # a cube is as large as the pyramid's when its edge is within this
 CHECK_TOLERANCE = 0.02      # a cube is still there when the map's height at its slot is at most this much lower
 CIRCLE_SIDES = 24

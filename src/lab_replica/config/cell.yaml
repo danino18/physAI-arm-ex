@@ -147,7 +147,7 @@ placement:
 
 # The pyramid of cubes (the goal console's `pyramid:`, exercise/pyramid.py):
 # three cubes in a row on the board, two on them, one on top. The area round
-# it (the row's length plus 6 cm on every side) must be free of the basket,
+# it (the row's length plus 4 cm on every side) must be free of the basket,
 # the obstacle and other items: `pyramid:` says what is in the way.
 pyramid:
   origin: [0.60, 0.0]        # the middle cube of the base row [m]

@@ -123,7 +123,9 @@ def plan_for(term, state, formula, items):
 
 def perform_plan(term, robot, args, state, plan):
     """Perform `plan` (a task.Plan) from `state` action by action, stopping at the
-    first that fails, as the goal console does. Returns (state, reached)."""
+    first that fails, as the goal console does. Returns (state, failed_at): the state the
+    performed actions should have produced, and the index of the action that failed or was
+    not performed (None when the whole plan was performed)."""
     term.say(f"plan ({actions(len(plan))}):")
     for k, a in enumerate(plan):
         term.say(f"  {k + 1}. {a}")
@@ -165,7 +167,7 @@ def perform_plan(term, robot, args, state, plan):
             term.say(term.colour("warning", False) + ": the gripper is "
                      + ("holding something" if grip else "empty") + ", unlike the state below: "
                      "check the scene, then use `reset` or the action console")
-    return state, failed_at is None
+    return state, failed_at
 
 
 def pyramid_layout(robot, origin=None):
@@ -183,7 +185,8 @@ def pyramid_layout(robot, origin=None):
 def build_pyramid(term, robot, args, state, items, origin=None, auto=False):
     """`pyramid:` plan and build the pyramid (exercise/pyramid.py): the cubes of its size
     among `items` go into its slots, the planner choosing which and in which order. A
-    pyramid that was left half built is continued. Returns the new state."""
+    pyramid that was left half built is continued. A cube the arm cannot reach, or whose
+    pick-up fails, is left out and the rest planned again. Returns the new state."""
     try:
         layout = pyramid_layout(robot, origin)
     except ValueError as e:
@@ -194,8 +197,11 @@ def build_pyramid(term, robot, args, state, items, origin=None, auto=False):
     if not free:
         term.say("the pyramid is built: nothing to do")
         return state
-    held = pddl.held(state)
-    have = [c for c in cubes if ("on-table", c) in state or c == held]
+
+    def available(usable):
+        held = pddl.held(state)
+        return [c for c in usable if ("on-table", c) in state or c == held]
+    have = available(cubes)
     term.say(f"pyramid: {len(free)} slots to fill with cubes of {layout.size * 1000:.0f} mm; "
              f"{len(have)} on the table or in the gripper ({', '.join(have) or 'none'})")
     if len(have) < len(free):
@@ -221,22 +227,41 @@ def build_pyramid(term, robot, args, state, items, origin=None, auto=False):
             return state
         term.say(term.colour("the pyramid's area is free", True) + f": {msg}")
         robot.start_pyramid(layout)
-    init = (frozenset(state) | pyr.facts(cubes)) - {("slot-free", s) for s in pyr.filled(state)}
-    robot.window_status("planning the pyramid")
-    term.say("planning ...")
-    try:
-        plan = task.solve(init, pyr.goal(), log=lambda s: None, items=items, slots=pyr.SLOTS)
-    except planner.Unsolvable:
-        term.say(term.colour("the pyramid cannot be reached from this state", False))
-        return state
-    except planner.PlannerError as e:
-        term.say(term.colour("planner error", False) + f": {e}")
-        return state
-    state, _ = perform_plan(term, robot, args, frozenset(init), plan)
-    # The pyramid's facts stay in the state (which slots are taken); the cubes' and the static
-    # ones are added again by the next pyramid:.
-    return frozenset(f for f in state if f[0] in ("in-slot", "on-table", "in-basket", "robot-gripping",
-                                                  "robot-gripper-empty"))
+    excluded = set(robot.ex.out_of_reach(cubes))
+    if excluded:
+        term.say(term.colour("out of the arm's reach", False) + f": {', '.join(sorted(excluded))} "
+                 "(left out; put them nearer the robot to use them)")
+    for attempt in range(3):
+        usable = [c for c in cubes if c not in excluded]
+        if len(available(usable)) < len(free):
+            term.say(term.colour("not enough cubes", False) + f": {len(free) - len(available(usable))} more cube(s) "
+                     f"of {layout.size * 1000:.0f} mm within reach needed")
+            return state
+        init = (frozenset(state) | pyr.facts(usable)) - {("slot-free", s) for s in pyr.filled(state)}
+        robot.window_status("planning the pyramid")
+        term.say("planning ...")
+        try:
+            plan = task.solve(init, pyr.goal(), log=lambda s: None, items=items, slots=pyr.SLOTS)
+        except planner.Unsolvable:
+            term.say(term.colour("the pyramid cannot be reached from this state", False))
+            return state
+        except planner.PlannerError as e:
+            term.say(term.colour("planner error", False) + f": {e}")
+            return state
+        state, failed_at = perform_plan(term, robot, args, frozenset(init), plan)
+        # The pyramid's facts stay in the state (which slots are taken); the cubes' and the static
+        # ones are added again by the next pyramid:.
+        state = frozenset(f for f in state if f[0] in ("in-slot", "on-table", "in-basket", "robot-gripping",
+                                                       "robot-gripper-empty"))
+        if failed_at is None:
+            return state
+        words = plan[failed_at].strip("()").split()
+        if words[0] != "pick-up" or robot.grip():
+            return state                    # a cube was lost, or was not let go: the user decides
+        excluded.add(words[1])
+        term.say(f"{words[1]} could not be picked up: left out, planning the rest again")
+        free = [s for s in pyr.SLOTS if s not in pyr.filled(state)]
+    return state
 
 
 def main():

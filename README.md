@@ -748,7 +748,7 @@ exact edge without measuring it: a few millimetres of error would add up in
 the layers). The slots are in
 [`exercise/pyramid.py`](src/lab_replica/lab_replica/exercise/pyramid.py);
 the place is the base row's middle cube (`origin`), its direction (`axis_yaw_deg`,
-90: along y) and the gap between neighbours. The area round the row (6 cm more on
+90: along y) and the gap between neighbours. The area round the row (4 cm more on
 every side) must be free of the basket, the obstacle and other items (also the cubes
 that are to be picked up: they stand in the way of the base); `pyramid:` looks
 first and says what is in the way. `pyramid: auto` then looks for the nearest place
@@ -820,7 +820,7 @@ forget-barrier:    # the motions no longer keep clear of it
 The depth of all the views goes into the same height map, over the larger
 region of `barrier:` in `config/perception.yaml` (only what was measured, not
 the space no view saw); what no item, the basket or the table explains is
-the candidate, and the tallest piece of at least 16 cm^2 (`tallest_piece`) is
+the candidate (only what at least two views saw: the arm, or a hand, in one view is not an obstacle), and the tallest piece of at least 16 cm^2 (`tallest_piece`) is
 the obstacle. It becomes a few boxes (oriented along a slanted wall, one per
 height of a stepped one; `static_obstacles`), which are in MoveIt's planning
 scene with every motion from then on, and which the motions rise above

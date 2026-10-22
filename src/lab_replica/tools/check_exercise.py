@@ -445,6 +445,44 @@ def check_barrier():
               f"{[np.round(b.c[:2], 2).tolist() for b in broken]}")
     run("arm over the base", arm_over_the_base)
 
+    def one_view_only():
+        # The cube is in every view; something tall (the arm, a hand) in one view only: not an obstacle.
+        from lab_replica.autonomy.depth_world import DepthWorld
+        from lab_replica.exercise.state_estimation import pixels_to_world
+
+        class Seen(Frame):
+            q = None
+
+            def points_world(self, mask=None, stride=1):
+                H, W = self.depth.shape
+                vv, uu = np.mgrid[0:H:stride, 0:W:stride]
+                d = self.depth[::stride, ::stride]
+                ok = np.isfinite(d) & (d > 0)
+                return pixels_to_world(uu[ok], vv[ok], d[ok], self.K, self.T_world_cam)
+
+            def project(self, P):
+                T = np.linalg.inv(self.T_world_cam)
+                C = np.atleast_2d(P) @ T[:3, :3].T + T[:3, 3]
+                return np.stack([self.K[0, 0] * C[:, 0] / C[:, 2] + self.K[0, 2],
+                                 self.K[1, 1] * C[:, 1] / C[:, 2] + self.K[1, 2]], axis=1), C[:, 2]
+        box = lambda x, y, r: [(x - r, y - r), (x + r, y - r), (x + r, y + r), (x - r, y + r)]  # noqa: E731
+        cube = (box(0.55, 0.10, 0.05), 0.12)
+        stray = (box(0.45, -0.10, 0.05), 0.40)        # 40 cm high, in one view only
+        frames = [Seen(0.2, 0.0, 0.85, [cube]), Seen(0.7, 0.0, 0.85, [cube]),
+                  Seen(0.45, -0.2, 0.85, [cube, stray]), Seen(0.45, 0.2, 0.85, [cube])]
+        cell = config.load_cell()
+        args = (frames, cell, objects.load_items(), objects.load_basket(cell), None, {})
+        world = DepthWorld(*args, max_item_height=0.6, robot_radius=0.17, region=([-0.1, 0.9], [-0.38, 0.36]),
+                           fill_unseen=False, base_height=0.24)
+        kept = sm.static_obstacles(world)
+        everything = sm.static_obstacles(world, persistent=False)
+        check("the obstacle is what several views saw: the cube, not what one view saw",
+              len(kept) == 1 and abs(kept[0].c[0] - 0.55) < 0.08 and abs(sm.barrier_top(kept) - 0.14) < 0.011
+              and abs(everything[0].c[0] - 0.45) < 0.08,
+              f"{len(kept)} boxes at {[np.round(b.c[:2], 2).tolist() for b in kept]}; without agreement the tallest is at "
+              f"{[np.round(b.c[:2], 2).tolist() for b in everything]}")
+    run("one view only", one_view_only)
+
     def commands():
         from lab_replica.console import parse_barrier_command as parse
         got = [parse(t) for t in ("scan:", "scan", "scan: all", "forget-barrier:", "scan: x", "scanner",
@@ -590,10 +628,10 @@ def check_pyramid():
         L = Layout((0.60, 0.0), axis_yaw=math.pi / 2)
         board = {"x_range": (0.093, 0.773), "y_range": (-0.28, 0.29)}
         check("clear_of: a free area has nothing in its way", pyr.clear_of(L, board) == [])
-        wall = sm.Box("barrier 0", [0.60, 0.17, 0.08], np.eye(3), [0.03, 0.03, 0.08])
+        wall = sm.Box("barrier 0", [0.60, 0.14, 0.08], np.eye(3), [0.03, 0.03, 0.08])
         near = pyr.clear_of(L, board, barrier=[wall])
         far = pyr.clear_of(L, board, barrier=[sm.Box("barrier 0", [0.30, -0.20, 0.08], np.eye(3), [0.03, 0.03, 0.08])])
-        check("clear_of: the obstacle within 6 cm of the row is in the way, one far off is not",
+        check("clear_of: the obstacle within 4 cm of the row is in the way, one far off is not",
               len(near) == 1 and "obstacle" in near[0] and far == [], str(near))
         check("clear_of: the basket, an item and the board's edge",
               len(pyr.clear_of(L, board, basket=(0.60, 0.20, 0.13))) == 1
@@ -640,6 +678,7 @@ def check_pyramid():
     run("parse_pyramid_command", commands)
 
     def executive_scene():
+        import types as _types
         # robot.set_obstacles with a pyramid: a stand-in executive that records what goes to MoveIt.
         for _ in range(30):                 # without ROS (the checks need none): stand-ins for its modules
             try:
@@ -666,6 +705,13 @@ def check_pyramid():
         ex.pyramid = Pyramid(L)
         ex.pyramid.put("base-left", "red-block", 0.60, -0.065)
         ex.pyramid.put("base-mid", "blue-block", 0.60, 0.0)
+        ex.cell = {"placement": {"min_reach": 0.20, "max_reach": 0.74}}
+        ex.scene = _types.SimpleNamespace(detections={
+            n: _types.SimpleNamespace(estimate=_types.SimpleNamespace(placement=_types.SimpleNamespace(x=x, y=y)))
+            for n, (x, y) in {"near": (0.45, 0.0), "far": (0.92, 0.02), "close": (0.10, 0.05)}.items()})
+        check("out_of_reach: the items beyond the arm's reach or too near its base",
+              sorted(ex.out_of_reach(["near", "far", "close", "unseen"])) == ["close", "far"])
+        ex.scene = None
         ex.set_obstacles(None, skip_slots=("base-left",))
         check("set_obstacles: the pyramid's cubes, but the ones the cube rests on",
               len(sent[-1]) == 1 and abs(sent[-1][0].c[1]) < 1e-9, f"{len(sent[-1])} boxes")
@@ -673,7 +719,6 @@ def check_pyramid():
         ex.set_obstacles(None)
         check("set_obstacles: and the fixed obstacle besides", len(sent[-1]) == 3 and sent[-1][-1].name == "barrier 0")
         # An item forgotten (forget-item:) after the last look is still in that look's detections.
-        import types as _types
         gone = _types.SimpleNamespace(estimate=_types.SimpleNamespace(placement=None))
         stale = _types.SimpleNamespace(detections={"white-block": gone}, basket_xy=None, obstacles=[])
         ex.pyramid, ex.basket = None, None
